@@ -10,7 +10,7 @@ import tempfile
 from dotenv import load_dotenv
 
 load_dotenv()
-GOOGLE_CREDENTIALS = os.getenv("GOOGLE_CREDENTIALS_KDAN_IT_PLAYGROUND")
+GOOGLE_CREDENTIALS = os.getenv("GOOGLE_CREDENTIALS_KDAN_IT_PLAYGROUND") or st.secrets['GOOGLE_CREDENTIALS_KDAN_IT_PLAYGROUND']
 
 # 判斷是本地還是正式環境
 if os.path.isfile(".env") or os.getenv("ENV") == "dev":  
