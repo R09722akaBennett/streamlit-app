@@ -2,12 +2,14 @@ import streamlit as st
 import os
 import json
 from google.cloud import documentai_v1 as documentai
+from google.cloud import storage  
 from pdf2image import convert_from_path
 import cv2
 import numpy as np
 import mimetypes
 import tempfile
 from dotenv import load_dotenv
+from datetime import datetime
 
 load_dotenv()
 
@@ -41,6 +43,7 @@ if DEFAULT_SA_KEY:
 else:
     if not os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
         st.error("未找到有效的 Google Cloud 憑證，請檢查環境設定")
+        st.stop()
 
 st.title("Document AI: Signature Field Detection")
 st.markdown("**Kdan Bennett**")
@@ -59,20 +62,23 @@ if sa_key:
         os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = tmp_file.name
     st.sidebar.success("JSON KEY HAS BEEN UPLOADED (Overriding default)")
 
-# 初始化 Document AI 客戶端
 try:
-    client = documentai.DocumentProcessorServiceClient()
+    documentai_client = documentai.DocumentProcessorServiceClient()
+    storage_client = storage.Client()
 except Exception as e:
-    st.error(f"無法初始化 Document AI 客戶端，請檢查憑證：{e}")
+    st.error(f"無法初始化 GCP 客戶端，請檢查憑證：{e}")
     st.stop()
 
 processor_name = "projects/962438265955/locations/us/processors/f69f1e73163aad4a"
+BUCKET_NAME = "dataset_signature"  
 
-# 後續程式碼保持不變
+# 初始化 session state
 if 'uploaded_file' not in st.session_state:
     st.session_state.uploaded_file = None
 if 'boxes' not in st.session_state:
     st.session_state.boxes = None
+if 'gcs_path' not in st.session_state:
+    st.session_state.gcs_path = None
 
 st.subheader("Upload Target File")
 st.write("Only support format with PDF (within 15 pages), JPG, JPEG, PNG")
@@ -81,6 +87,7 @@ uploaded_file = st.file_uploader("SELECT FILE", type=["pdf", "jpg", "jpeg", "png
 if st.button("Clear"):
     st.session_state.uploaded_file = None
     st.session_state.boxes = None
+    st.session_state.gcs_path = None
     st.rerun()
 
 if uploaded_file:
@@ -90,6 +97,20 @@ if st.session_state.uploaded_file:
     with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(st.session_state.uploaded_file.name)[1]) as tmp_file:
         tmp_file.write(st.session_state.uploaded_file.read())
         file_path = tmp_file.name
+
+    if not (os.path.isfile(".env") or os.getenv("ENV") == "dev"):
+        try:
+            bucket = storage_client.bucket(BUCKET_NAME)
+            # 使用時間戳生成唯一的檔案名稱，儲存到 streamlit_dataset 資料夾
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            file_extension = os.path.splitext(st.session_state.uploaded_file.name)[1]
+            gcs_blob_name = f"streamlit_dataset/{timestamp}_{st.session_state.uploaded_file.name}"
+            blob = bucket.blob(gcs_blob_name)
+            blob.upload_from_filename(file_path)
+            st.session_state.gcs_path = f"gs://{BUCKET_NAME}/{gcs_blob_name}"
+            st.success(f"文件已成功上傳至 GCS: {st.session_state.gcs_path}")
+        except Exception as e:
+            st.error(f"無法上傳文件至 GCS: {e}")
 
     def detect_signature_boxes(file_path):
         try:
@@ -111,7 +132,7 @@ if st.session_state.uploaded_file:
                 st.error("FORMAT INVALID")
                 return []
 
-            result = client.process_document(request=request)
+            result = documentai_client.process_document(request=request)
             boxes = []
             for entity in result.document.entities:
                 if entity.type_ == "signature_field":
