@@ -62,7 +62,6 @@ if sa_key:
         os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = tmp_file.name
     st.sidebar.success("JSON KEY HAS BEEN UPLOADED (Overriding default)")
 
-# 初始化 Document AI 和 Storage 客戶端
 try:
     documentai_client = documentai.DocumentProcessorServiceClient()
     storage_client = storage.Client()
@@ -88,11 +87,9 @@ st.write("Only support format with PDF (within 15 pages), JPG, JPEG, PNG")
 st.info("上傳的文件將用於簽名檢測並儲存以優化服務體驗。請避免上傳包含敏感或機密資訊的文件。")
 uploaded_file = st.file_uploader("SELECT FILE", type=["pdf", "jpg", "jpeg", "png"], key=st.session_state.uploader_key)
 
-# 更新 session state
 if uploaded_file:
     st.session_state.uploaded_file = uploaded_file
 
-# 顯示上傳狀態與按鈕
 if st.session_state.uploaded_file:
     st.write(f"已選擇文件：{st.session_state.uploaded_file.name}")
     col1, col2 = st.columns(2)
@@ -200,6 +197,5 @@ if st.session_state.uploaded_file:
             st.session_state.uploaded_file = None
             st.session_state.boxes = None
             st.session_state.gcs_path = None
-            # 更新 uploader_key 以強制重置 st.file_uploader
             st.session_state.uploader_key = f"doc_upload_{datetime.now().strftime('%Y%m%d%H%M%S')}"
             st.rerun()
