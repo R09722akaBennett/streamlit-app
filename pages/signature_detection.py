@@ -88,6 +88,7 @@ uploaded_file = st.file_uploader("SELECT FILE", type=["pdf", "jpg", "jpeg", "png
 
 if st.session_state.uploaded_file:
     st.write(f"已選擇文件：{st.session_state.uploaded_file.name}")
+    st.button("開始")
 
 if st.session_state.uploaded_file and st.button("開始"):
     with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(st.session_state.uploaded_file.name)[1]) as tmp_file:
