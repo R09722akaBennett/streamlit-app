@@ -2,7 +2,7 @@ import streamlit as st
 import os
 import json
 from google.cloud import documentai_v1 as documentai
-from google.cloud import storage  
+from google.cloud import storage
 from pdf2image import convert_from_path
 import cv2
 import numpy as np
@@ -62,6 +62,7 @@ if sa_key:
         os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = tmp_file.name
     st.sidebar.success("JSON KEY HAS BEEN UPLOADED (Overriding default)")
 
+# 初始化 Document AI 和 Storage 客戶端
 try:
     documentai_client = documentai.DocumentProcessorServiceClient()
     storage_client = storage.Client()
@@ -70,7 +71,7 @@ except Exception as e:
     st.stop()
 
 processor_name = "projects/962438265955/locations/us/processors/f69f1e73163aad4a"
-BUCKET_NAME = "dataset_signature"  
+BUCKET_NAME = "dataset_signature"  # 你的儲存桶名稱
 
 # 初始化 session state
 if 'uploaded_file' not in st.session_state:
@@ -82,6 +83,8 @@ if 'gcs_path' not in st.session_state:
 
 st.subheader("Upload Target File")
 st.write("Only support format with PDF (within 15 pages), JPG, JPEG, PNG")
+# 添加提示訊息
+st.info("上傳的文件將用於簽名檢測並儲存以優化服務體驗。請避免上傳包含敏感或機密資訊的文件。")
 uploaded_file = st.file_uploader("SELECT FILE", type=["pdf", "jpg", "jpeg", "png"], key="doc")
 
 if st.button("Clear"):
@@ -98,13 +101,18 @@ if st.session_state.uploaded_file:
         tmp_file.write(st.session_state.uploaded_file.read())
         file_path = tmp_file.name
 
+    # 在正式環境中上傳文件到 GCS
     if not (os.path.isfile(".env") or os.getenv("ENV") == "dev"):
         try:
             bucket = storage_client.bucket(BUCKET_NAME)
-            # 使用時間戳生成唯一的檔案名稱，儲存到 streamlit_dataset 資料夾
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            file_extension = os.path.splitext(st.session_state.uploaded_file.name)[1]
-            gcs_blob_name = f"streamlit_dataset/{timestamp}_{st.session_state.uploaded_file.name}"
+            # 生成結構化檔案名稱
+            now = datetime.now()
+            upload_date = now.strftime("%Y%m%d")
+            timestamp = now.strftime("%H%M%S")
+            mime_type, _ = mimetypes.guess_type(st.session_state.uploaded_file.name)
+            file_type = "pdf" if mime_type == "application/pdf" else "image"
+            original_filename = st.session_state.uploaded_file.name
+            gcs_blob_name = f"streamlit_dataset/{upload_date}/{file_type}/{timestamp}_{original_filename}"
             blob = bucket.blob(gcs_blob_name)
             blob.upload_from_filename(file_path)
             st.session_state.gcs_path = f"gs://{BUCKET_NAME}/{gcs_blob_name}"
