@@ -10,7 +10,9 @@ import tempfile
 from dotenv import load_dotenv
 
 load_dotenv()
-GOOGLE_CREDENTIALS = os.getenv("GOOGLE_CREDENTIALS_KDAN_IT_PLAYGROUND") or st.secrets['GOOGLE_CREDENTIALS_KDAN_IT_PLAYGROUND']
+
+# 從環境變數或 Streamlit Secrets 獲取憑證
+GOOGLE_CREDENTIALS = os.getenv("GOOGLE_CREDENTIALS_KDAN_IT_PLAYGROUND") or st.secrets.get('GOOGLE_CREDENTIALS_KDAN_IT_PLAYGROUND')
 
 # 判斷是本地還是正式環境
 if os.path.isfile(".env") or os.getenv("ENV") == "dev":  
@@ -22,23 +24,29 @@ if os.path.isfile(".env") or os.getenv("ENV") == "dev":
         DEFAULT_SA_KEY = None
 else:  # 正式環境（如 Streamlit Cloud）
     if GOOGLE_CREDENTIALS:
-        try:
-            DEFAULT_SA_KEY = json.loads(GOOGLE_CREDENTIALS)  # 解析 JSON 字串
-        except json.JSONDecodeError:
-            st.error("正式環境：GOOGLE_CREDENTIALS_KDAN_IT_PLAYGROUND 必須是有效的 JSON 字串")
-            DEFAULT_SA_KEY = None
+        # 如果是 Streamlit Secrets，直接使用字典；否則嘗試解析 JSON 字串
+        if isinstance(GOOGLE_CREDENTIALS, dict):
+            DEFAULT_SA_KEY = GOOGLE_CREDENTIALS  # 直接使用字典
+        else:
+            try:
+                DEFAULT_SA_KEY = json.loads(GOOGLE_CREDENTIALS)  # 解析 JSON 字串
+            except (json.JSONDecodeError, TypeError):
+                st.error("正式環境：GOOGLE_CREDENTIALS_KDAN_IT_PLAYGROUND 必須是有效的 JSON 字串或字典")
+                DEFAULT_SA_KEY = None
     else:
         DEFAULT_SA_KEY = None
 
-
+# 設置 GOOGLE_APPLICATION_CREDENTIALS
 if DEFAULT_SA_KEY:
     with tempfile.NamedTemporaryFile(delete=False, suffix=".json", mode='w') as tmp_file:
         json.dump(DEFAULT_SA_KEY, tmp_file)
         tmp_file.flush()
-        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = tmp_file.name  # 使用正確的環境變數名稱
+        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = tmp_file.name
 else:
     if not os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
         st.error("未找到有效的 Google Cloud 憑證，請檢查環境設定")
+
+# ... 後續程式碼不變 ...
 
 st.title("Document AI: Signature Field Detection")
 st.markdown("**Kdan Bennett**")
