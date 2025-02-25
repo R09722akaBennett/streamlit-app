@@ -71,7 +71,7 @@ except Exception as e:
     st.stop()
 
 processor_name = "projects/962438265955/locations/us/processors/f69f1e73163aad4a"
-BUCKET_NAME = "dataset_signature"  # 你的儲存桶名稱
+BUCKET_NAME = "dataset_signature"
 
 # 初始化 session state
 if 'uploaded_file' not in st.session_state:
@@ -83,20 +83,13 @@ if 'gcs_path' not in st.session_state:
 
 st.subheader("Upload Target File")
 st.write("Only support format with PDF (within 15 pages), JPG, JPEG, PNG")
-# 添加提示訊息
 st.info("上傳的文件將用於簽名檢測並儲存以優化服務體驗。請避免上傳包含敏感或機密資訊的文件。")
 uploaded_file = st.file_uploader("SELECT FILE", type=["pdf", "jpg", "jpeg", "png"], key="doc")
 
-if st.button("Clear"):
-    st.session_state.uploaded_file = None
-    st.session_state.boxes = None
-    st.session_state.gcs_path = None
-    st.rerun()
-
-if uploaded_file:
-    st.session_state.uploaded_file = uploaded_file
-
 if st.session_state.uploaded_file:
+    st.write(f"已選擇文件：{st.session_state.uploaded_file.name}")
+
+if st.session_state.uploaded_file and st.button("開始"):
     with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(st.session_state.uploaded_file.name)[1]) as tmp_file:
         tmp_file.write(st.session_state.uploaded_file.read())
         file_path = tmp_file.name
@@ -105,7 +98,6 @@ if st.session_state.uploaded_file:
     if not (os.path.isfile(".env") or os.getenv("ENV") == "dev"):
         try:
             bucket = storage_client.bucket(BUCKET_NAME)
-            # 生成結構化檔案名稱
             now = datetime.now()
             upload_date = now.strftime("%Y%m%d")
             timestamp = now.strftime("%H%M%S")
@@ -194,3 +186,9 @@ if st.session_state.uploaded_file:
         
         st.subheader("Visualization")
         visualize_boxes(file_path, boxes)
+
+if st.button("Clear"):
+    st.session_state.uploaded_file = None
+    st.session_state.boxes = None
+    st.session_state.gcs_path = None
+    st.rerun()
