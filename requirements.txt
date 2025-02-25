@@ -11,7 +11,6 @@ sqlparse
 langfuse
 openai
 vacances_scolaires_france==0.10.0
-plotly==5.23.0
 prophet
 scipy==1.14.0
 scikit-learn
@@ -22,3 +21,8 @@ opencv-python-headless
 matplotlib
 watchdog
 python-dotenv
+tqdm
+pygwalker
+xgboost
+lightgbm
+shap
