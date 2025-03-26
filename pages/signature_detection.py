@@ -69,7 +69,7 @@ except Exception as e:
     st.error(f"無法初始化 GCP 客戶端，請檢查憑證：{e}")
     st.stop()
 
-processor_name = "projects/962438265955/locations/us/processors/f69f1e73163aad4a"
+processor_name = "projects/962438265955/locations/us/processors/6d0867440d8644c3"
 BUCKET_NAME = "dataset_signature"
 
 # 初始化 session state
@@ -150,8 +150,160 @@ if st.session_state.uploaded_file:
                     st.error(f"detect_signature_boxes ERROR: {e}")
                     return []
 
+            def find_nearest_underline(image, text_box, search_range=50):
+                """
+                尋找離動態文本最近的底線，並返回其上方區域作為簽名區域
+                """
+                x_min, y_min, x_max, y_max = map(int, text_box)
+                
+                # 定義搜索區域（右邊和下方）
+                areas = {
+                    "right": (x_max, y_min - search_range, 1327, y_max + search_range),
+                    "bottom": (x_min, y_max, x_max, y_max + search_range)
+                }
+                
+                closest_line = None
+                min_distance = float('inf')
+                best_direction = None
+                all_lines = []
+                
+                for direction, (a_x_min, a_y_min, a_x_max, a_y_max) in areas.items():
+                    if a_x_max <= a_x_min or a_y_max <= a_y_min:
+                        continue
+                    search_area = image[max(0, a_y_min):a_y_max, max(0, a_x_min):a_x_max]
+                    if search_area.size == 0:
+                        continue
+                    
+                    # 轉為灰度圖並二值化
+                    gray = cv2.cvtColor(search_area, cv2.COLOR_BGR2GRAY)
+                    _, binary = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY_INV)
+                    
+                    # 尋找水平線（底線），調整參數以檢測更長的底線
+                    lines = cv2.HoughLinesP(binary, 1, np.pi / 180, threshold=10, minLineLength=200, maxLineGap=150)
+                    if lines is None:
+                        continue
+                    
+                    # 收集所有線段
+                    for line in lines:
+                        x1, y1, x2, y2 = line[0]
+                        if abs(y1 - y2) < 10:  # 確保是水平線
+                            if direction == "right":
+                                distance = abs(y1 - (y_max - a_y_min))
+                            else:  # bottom
+                                distance = abs(y1)
+                            all_lines.append((x1, y1, x2, y2, distance, direction))
+                
+                if not all_lines:
+                    return text_box
+                
+                # 按距離排序，選擇最近的底線
+                all_lines.sort(key=lambda x: x[4])
+                closest_line = all_lines[0]
+                min_distance = closest_line[4]
+                best_direction = closest_line[5]
+                
+                # 合併同一高度的線段
+                merged_lines = []
+                current_line = list(closest_line[:4])
+                current_y = closest_line[1]
+                for line in all_lines[1:]:
+                    x1, y1, x2, y2, _, direction = line
+                    if direction != best_direction:
+                        continue
+                    if abs(y1 - current_y) < 10:  # 同一高度
+                        current_line[0] = min(current_line[0], x1)
+                        current_line[2] = max(current_line[2], x2)
+                    else:
+                        merged_lines.append(current_line)
+                        current_line = [x1, y1, x2, y2]
+                        current_y = y1
+                merged_lines.append(current_line)
+                
+                # 選擇最長的底線
+                longest_line = max(merged_lines, key=lambda line: line[2] - line[0])
+                line_x1, line_y1, line_x2, line_y2 = longest_line
+                
+                # 轉換回原圖座標
+                if best_direction == "right":
+                    line_y = line_y1 + (y_min - search_range)
+                    line_x_min = line_x1 + x_max
+                    line_x_max = line_x2 + x_max
+                else:  # bottom
+                    line_y = line_y1 + y_max
+                    line_x_min = line_x1 + x_min
+                    line_x_max = line_x2 + x_min
+                
+                # 從底線往上檢測空白區域，確定簽名區域高度
+                signature_height = 0
+                max_height = 50
+                for h in range(1, max_height + 1):
+                    y_top = line_y - h
+                    if y_top < 0:
+                        break
+                    roi = image[y_top:line_y, line_x_min:line_x_max]
+                    if roi.size == 0:
+                        break
+                    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+                    _, binary = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)
+                    white_pixels = cv2.countNonZero(binary)
+                    total_pixels = roi.shape[0] * roi.shape[1]
+                    white_ratio = white_pixels / total_pixels
+                    if white_ratio < 0.95:
+                        break
+                    signature_height = h
+                
+                signature_height = max(30, signature_height)
+                signature_box = [line_x_min, line_y - signature_height, line_x_max, line_y]
+                return signature_box
+
+
+            def find_signature_area(image, text_box, search_range=50):
+                """
+                動態判斷簽名區域位置（直接尋找底線）
+                """
+                x_min, y_min, x_max, y_max = map(int, text_box)
+                return find_nearest_underline(image, text_box, search_range)
+
+
+            def extract_fillable_area(image, box):
+                """
+                用二值化提取填寫區域（確保與底線長度一致）
+                """
+                x_min, y_min, x_max, y_max = map(int, box)
+                roi = image[y_min:y_max, x_min:x_max]
+                if roi.size == 0:
+                    return box
+                
+                # 轉為灰度圖並二值化
+                gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+                _, binary = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY_INV)
+                
+                # 尋找輪廓，只保留空白區域
+                contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                if not contours:
+                    return box
+                
+                # 選擇最大的輪廓作為填寫區域
+                max_area = 0
+                best_contour = None
+                for contour in contours:
+                    x, y, w, h = cv2.boundingRect(contour)
+                    area = w * h
+                    if area > max_area and w > 20 and h > 10:
+                        max_area = area
+                        best_contour = (x, y, w, h)
+                
+                if best_contour:
+                    x, y, w, h = best_contour
+                    fillable_box = [x_min, y_min + y, x_max, y_min + y + h]
+                    return fillable_box
+                
+                return box
+
+
             def visualize_boxes(file_path, boxes):
                 mime_type, _ = mimetypes.guess_type(file_path)
+
                 if mime_type == "application/pdf":
                     images = convert_from_path(file_path, dpi=200)
                 elif mime_type in ["image/jpeg", "image/png", "image/jpg"]:
@@ -174,9 +326,20 @@ if st.session_state.uploaded_file:
                         box = box_info["box"]
                         confidence = box_info["confidence"]
                         x_min, y_min, x_max, y_max = [int(coord * dim) for coord, dim in zip(box, [width, height, width, height])]
-                        cv2.rectangle(img_cv, (x_min, y_min), (x_max, y_max), (0, 255, 0), 2)
+                        
+                        # 空間分析：動態判斷簽名區域位置
+                        signature_box = find_signature_area(img_cv, [x_min, y_min, x_max, y_max], search_range=50)
+                        
+                        # 二值化：提取填寫區域
+                        fillable_box = extract_fillable_area(img_cv, signature_box)
+                        x_min_f, y_min_f, x_max_f, y_max_f = fillable_box
+                        
+                        # 可視化原始框（動態文本）
+                        cv2.rectangle(img_cv, (x_min, y_min), (x_max, y_max), (0, 0, 255), 2)  # 紅色框
+                        # 可視化填寫區域
+                        cv2.rectangle(img_cv, (x_min_f, y_min_f), (x_max_f, y_max_f), (0, 255, 0), 2)  # 綠色框
                         label = f"Conf: {confidence:.2f}"
-                        cv2.putText(img_cv, label, (x_min, y_min - 10), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 2)
+                        cv2.putText(img_cv, label, (x_min_f, y_min_f - 10), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 2)
                     
                     st.image(cv2.cvtColor(img_cv, cv2.COLOR_BGR2RGB), caption=f"第 {page_num + 1} 頁", use_container_width=True)
 
