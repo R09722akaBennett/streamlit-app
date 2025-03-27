@@ -71,7 +71,7 @@ st.markdown("""
 
 **Pricing**：  
 
- USD$ 30 / 1000 pages = USD$ 0.03/page
+ USD $ 30 / 1000 pages = USD $ 0.03/page
 
 **注意**：目前支援 PDF（最多 15 頁）和圖像文件。上傳文件將用於服務優化，請避免包含敏感資訊。
 """)
