@@ -26,3 +26,5 @@ pygwalker
 xgboost
 lightgbm
 shap
+streamlit_feedback
+pytz

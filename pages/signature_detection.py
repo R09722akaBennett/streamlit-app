@@ -1,3 +1,4 @@
+import pytz
 import streamlit as st
 import os
 import json
@@ -12,6 +13,7 @@ from dotenv import load_dotenv
 from datetime import datetime
 from typing import List, Dict, Tuple, Optional
 import re
+import time
 
 load_dotenv()
 # --- Google Cloud Credentials Setup ---
@@ -49,16 +51,16 @@ else:
 # --- Streamlit UI Setup ---
 st.title("Document AI: Signature Field Detection")
 st.markdown("**Kdan Bennett**")
-st.markdown("""
-### IDP Signature Field Detection (trial version)
+with st.expander("IDP Signature Field Detection (trial version)"):
+    st.write("""
 **Summary**：  
 此系統由 Kdan Infra 開發，通過自動檢測 PDF 和圖像（JPG、PNG）中的簽名欄位來簡化文件處理流程。
 系統利用 Google Cloud 的 Document AI 提取結構化數據並推斷簽名區域，提升文件處理效率。
 
 **解決的痛點**：  
-- **手動審查耗時**：傳統方法需人工定位簽名欄位，拖慢工作流程。  
-- **檢測不一致**：文件佈局多樣化導致簽名欄位識別難以標準化。  
-- **擴展性問題**：手動處理難以應對大量文件。
+- :tired_face: **手動審查耗時**：傳統方法需人工定位簽名欄位，拖慢工作流程。  
+- :negative_squared_cross_mark: **檢測不一致**：文件佈局多樣化導致簽名欄位識別難以標準化。  
+- :dancers: **擴展性問題**：手動處理難以應對大量文件。
 
 **Process**：  
 1. **上傳**：用戶上傳 PDF 或圖像文件。  
@@ -69,19 +71,18 @@ st.markdown("""
 **Future**：  
 這是MVP版本。後續將引入佈局感知的多模態模型（結合文字、圖像與空間數據），提升準確性並處理複雜文件結構。這部分會需要花更多時間及計算資源來完成，未來會訓練本地模型來取代雲端模型。
 
-**Pricing**：  
-
- USD $ 30 / 1000 pages = USD $ 0.03/page
+**Pricing**:  
+USD\$ 30 / 1000 pages = USD/\$ 0.03/page
  
 """)
 
 # Sidebar for optional GCP JSON key upload
-st.sidebar.subheader("選擇文件來源")
+st.sidebar.subheader(":file_folder: File Source :file_folder:")
 file_source = st.sidebar.selectbox("Select File Source", ["Upload File", "Use Default File"])
 st.sidebar.divider()
-st.sidebar.subheader("Upload GCP JSON Key (Optional)")
+st.sidebar.subheader(":secret: :key: Upload GCP JSON Key (Optional)")
 st.sidebar.text("Default credentials are in use. Upload your own JSON key to override.")
-sa_key = st.sidebar.file_uploader("Upload JSON 文件", type=["json"], key="sa_key")
+sa_key = st.sidebar.file_uploader("Upload JSON key", type=["json"], key="sa_key")
 st.sidebar.divider()
 enable_debug_prints = st.sidebar.checkbox("Enable Debug Mode", value=False)
 if sa_key:
@@ -90,14 +91,14 @@ if sa_key:
         json.dump(custom_key, tmp_file)
         tmp_file.flush()
         os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = tmp_file.name
-    st.sidebar.success("JSON KEY HAS BEEN UPLOADED (Overriding default)")
+    st.sidebar.success(":white_check_mark: JSON KEY HAS BEEN UPLOADED (Overriding default)")
 
 # --- Initialize Google Cloud Clients ---
 try:
     documentai_client = documentai.DocumentProcessorServiceClient()
     storage_client = storage.Client()
 except Exception as e:
-    st.error(f"Failed to initialize GCP clients. Please check credentials: {e}")
+    st.error(f":x:Failed to initialize GCP clients. Please check credentials: {e}")
     st.stop()
 
 processor_name = "projects/962438265955/locations/us/processors/6d0867440d8644c3"
@@ -112,9 +113,21 @@ if 'gcs_path' not in st.session_state:
     st.session_state.gcs_path = None
 if 'uploader_key' not in st.session_state:
     st.session_state.uploader_key = "doc_upload"
+if 'doc_dimensions' not in st.session_state:
+    st.session_state.doc_dimensions = None
+if 'current_processed_results' not in st.session_state:
+    st.session_state.current_processed_results = None
+if 'current_file_path' not in st.session_state:
+    st.session_state.current_file_path = None
+if 'feedback_submitted' not in st.session_state:
+    st.session_state.feedback_submitted = False
+if 'feedback_value' not in st.session_state:
+    st.session_state.feedback_value = None
+if 'feedback_comment' not in st.session_state:
+    st.session_state.feedback_comment = ""
 
 # --- File Upload UI ---
-st.subheader("Upload Target File")
+st.subheader(":file_folder: Upload Target File")
 
 if file_source == "Upload File":
     st.text("Only support format with PDF (within 15 pages), JPG, JPEG, PNG")
@@ -127,10 +140,10 @@ if file_source == "Upload File":
 elif file_source == "Use Default File":
     default_file_path = "pages/references/社會住宅包租代管第4期計畫民眾承租住宅申請書1120621.pdf"
     if os.path.exists(default_file_path):
-        st.info(f"使用預設文件: {os.path.basename(default_file_path)}")
+        st.info(f":pushpin: Default file selected: {os.path.basename(default_file_path)}")
         st.session_state.uploaded_file = open(default_file_path, "rb") # Open default file in binary read mode
     else:
-        st.error(f"預設文件路徑錯誤: {default_file_path}")
+        st.error(f":x: Default file path error: {default_file_path}")
         st.stop()
 
 # --- Core Functions from Your Code (Unchanged) ---
@@ -139,7 +152,7 @@ def extract_signature_blank(image: np.ndarray, bbox: Tuple[int, int, int, int], 
         # Crop Signature field
         x1, y1, x2, y2 = bbox
         if x2 <= x1 or y2 <= y1 or x1 < 0 or y1 < 0:
-            st.warning(f"Warning: Invalid Signature field Bounding Box : {bbox}")
+            st.warning(f":pushpin: Warning: Invalid Signature field Bounding Box : {bbox}")
             return None
 
         height, width = image.shape[:2]
@@ -148,7 +161,7 @@ def extract_signature_blank(image: np.ndarray, bbox: Tuple[int, int, int, int], 
         x2 = min(width, x2)
         y2 = min(height, y2)
         if x2 <= x1 or y2 <= y1:
-            st.warning(f"Warning: Invalid Signature field Bounding Box : ({x1}, {y1}, {x2}, {y2})")
+            st.warning(f":pushpin: Warning: Invalid Signature field Bounding Box : ({x1}, {y1}, {x2}, {y2})")
             return None
 
         signature_area = image[y1:y2, x1:x2]
@@ -182,18 +195,18 @@ def extract_signature_blank(image: np.ndarray, bbox: Tuple[int, int, int, int], 
 
         # Check
         if blank_x2 <= blank_x1 or blank_y2 <= blank_y1:
-            st.warning(f"Warning: Invalid blank Bounding Box :  ({blank_x1}, {blank_y1}, {blank_x2}, {blank_y2})")
+            st.warning(f":pushpin: Warning: Invalid blank Bounding Box :  ({blank_x1}, {blank_y1}, {blank_x2}, {blank_y2})")
             return None
 
         return [(blank_x1, blank_y1, blank_x2, blank_y2)] # Return signature blank bounding box
 
     except Exception as e:
-        st.error(f"Error : extract_signature_blank: {e}, BBox: {bbox}")
+        st.error(f":x: Error : extract_signature_blank: {e}, BBox: {bbox}")
         return None
 
 def get_pixel_bbox(normalized_vertices: List[documentai.NormalizedVertex], page_width: int, page_height: int) -> Optional[Tuple[int, int, int, int]]:
     if not normalized_vertices:
-        st.warning(f"Warning : Empty normalized_vertices。")
+        st.warning(f":pushpin: Warning : Empty normalized_vertices。")
         return None
 
     try:
@@ -202,7 +215,7 @@ def get_pixel_bbox(normalized_vertices: List[documentai.NormalizedVertex], page_
         y_coords = [v.y for v in normalized_vertices if v.y is not None and 0 <= v.y <= 1]
 
         if not x_coords or not y_coords:
-             st.warning(f"Warning: unable extract the x, y coordinate from vertices: {normalized_vertices}")
+             st.warning(f":pushpin: Warning: unable extract the x, y coordinate from vertices: {normalized_vertices}")
              return None
 
         # Use np.floor for min and np.ceil for max for conservative bounding box
@@ -216,14 +229,14 @@ def get_pixel_bbox(normalized_vertices: List[documentai.NormalizedVertex], page_
 
         # Check for NaN or Inf coordinates after calculation
         if any(coord is None or not np.isfinite(coord) for coord in [xmin, ymin, xmax, ymax]):
-             st.error(f"Warning: Invalid coordinates after calculation: xmin={xmin}, ymin={ymin}, xmax={xmax}, ymax={ymax}")
+             st.warning(f":pushpin: Warning: Invalid coordinates after calculation: xmin={xmin}, ymin={ymin}, xmax={xmax}, ymax={ymax}")
              return None
 
         # Check for invalid box dimensions (max <= min)
         if xmax <= xmin or ymax <= ymin:
              # Check if there is negative, allow zero width/height initially, fix later if needed
              if xmax < xmin or ymax < ymin:
-                 st.warning(f"Warning: Invalid bounding box after calculation (max < min): xmin={xmin:.1f}, ymin={ymin:.1f}, xmax={xmax:.1f}, ymax={ymax:.1f}")
+                 st.warning(f":pushpin: Warning: Invalid bounding box after calculation (max < min): xmin={xmin:.1f}, ymin={ymin:.1f}, xmax={xmax:.1f}, ymax={ymax:.1f}")
                  return None
              # else: # Handle zero width/height cases if necessary, often downstream logic handles this
              #     print(f"Log: BBox is a line or dot: xmin={xmin:.1f}, ymin={ymin:.1f}, xmax={xmax:.1f}, ymax={ymax:.1f}")
@@ -232,14 +245,14 @@ def get_pixel_bbox(normalized_vertices: List[documentai.NormalizedVertex], page_
         return int(xmin), int(ymin), int(xmax), int(ymax)
 
     except Exception as e:
-        st.error(f"Error: Calculation get_pixel_bbox : {e}, vertices: {normalized_vertices}")
+        st.error(f":x: Error: Calculation get_pixel_bbox : {e}, vertices: {normalized_vertices}")
         return None
 
 def get_page_tokens(page: documentai.Document.Page, page_width: int, page_height: int) -> List[Dict]:
     """Extract tokens and pixel bounding box from all pages."""
     tokens = []
     if not page.tokens:
-         st.warning(f"Warning: Page {page.page_number} has not tokens(Empty Page)。") 
+         st.warning(f":pushpin: Warning: Page {page.page_number} has not tokens(Empty Page)。") 
          return tokens
 
     for token in page.tokens:
@@ -278,7 +291,7 @@ def find_nearest_token_on_line(
     min_dist = float('inf')
 
     if debug_mode:
-        st.info(f"[Debug find_nearest] Target: {target_bbox} CY: {target_cy:.1f}, H: {target_height}, Y-Tol(px): {target_height * y_tolerance_factor:.1f}")
+        st.info(f":heavy_multiplication_x: [Debug find_nearest] Target: {target_bbox} CY: {target_cy:.1f}, H: {target_height}, Y-Tol(px): {target_height * y_tolerance_factor:.1f}")
         # logging.info(f"[Debug find_nearest] Target: {target_bbox} CY: {target_cy:.1f}, H: {target_height}, Y-Tol(px): {target_height * y_tolerance_factor:.1f}")
 
     potential_matches = [] 
@@ -341,7 +354,7 @@ def find_nearest_token_on_line(
 
 
     if debug_mode:
-        st.info(f"[Debug find_nearest] Tokens near Target Y:")
+        st.info(f":heavy_multiplication_x: [Debug find_nearest] Tokens near Target Y:")
         # logging.info(f"[Debug find_nearest] Tokens near Target Y:")
         potential_matches.sort(key=lambda x: x['bbox'][0]) # Sort by x-coordinate
         for p_match in potential_matches:
@@ -351,10 +364,10 @@ def find_nearest_token_on_line(
             st.info(f"  - Text: '{p_match['text']}', BBox: {p_match['bbox']}, CY: {p_match['cy']:.1f}, DistY: {p_match.get('dist_y', -1):.1f} {status}")
             # logging.info(f"  - Text: '{p_match['text']}', BBox: {p_match['bbox']}, CY: {p_match['cy']:.1f}, DistY: {p_match.get('dist_y', -1):.1f} {status}")
         if nearest_token_info:
-            st.info(f"[Debug find_nearest] Selected Nearest: '{nearest_token_info['text']}' BBox: {nearest_token_info['bbox']} DistMetric: {min_dist:.1f}")
+            st.info(f":heavy_multiplication_x: [Debug find_nearest] Selected Nearest: '{nearest_token_info['text']}' BBox: {nearest_token_info['bbox']} DistMetric: {min_dist:.1f}")
             # logging.info(f"[Debug find_nearest] Selected Nearest: '{nearest_token_info['text']}' BBox: {nearest_token_info['bbox']} DistMetric: {min_dist:.1f}")
         else:
-            st.info(f"[Debug find_nearest] No suitable nearest token found in direction '{direction}' within {max_horizontal_dist}px.")
+            st.info(f":heavy_multiplication_x: [Debug find_nearest] No suitable nearest token found in direction '{direction}' within {max_horizontal_dist}px.")
             # logging.info(f"[Debug find_nearest] No suitable nearest token found in direction '{direction}' within {max_horizontal_dist}px.")
 
     return nearest_token_info
@@ -394,7 +407,7 @@ def infer_signature_area_bbox(
 
     # --- Get Label BBox ---
     if not label_entity.page_anchor or not label_entity.page_anchor.page_refs:
-        if enable_debug_prints: st.warning(f"Warining: Label Entity '{label_entity.mention_text}' no page_refs。")
+        if enable_debug_prints: st.warning(f":pushpin: Warining: Label Entity '{label_entity.mention_text}' no page_refs。")
         # loggin.warning(f"Warining: Label Entity '{label_entity.mention_text}' no page_refs。")
         return None
     # First page contain label coordinate details
@@ -402,13 +415,13 @@ def infer_signature_area_bbox(
 
     # Use the bounding poly from page_ref for the label
     if not page_ref.bounding_poly or not page_ref.bounding_poly.normalized_vertices:
-         if enable_debug_prints: st.error(f"Error: Label Entity '{label_entity.mention_text}'  page_ref has no bounding_poly。")
+         if enable_debug_prints: st.error(f":x: Error: Label Entity '{label_entity.mention_text}'  page_ref has no bounding_poly。")
         #  logging.error(f"Error: Label Entity '{label_entity.mention_text}'  page_ref has no bounding_poly。")
          return None
     # Get label coordinate bounding box
     label_bbox = get_pixel_bbox(page_ref.bounding_poly.normalized_vertices, page_width, page_height)
     if label_bbox is None:
-        if enable_debug_prints: st.error(f"Error: Error extract Label Entity '{label_entity.mention_text}' bounding box。")
+        if enable_debug_prints: st.error(f":x: Error: Error extract Label Entity '{label_entity.mention_text}' bounding box。")
         # logging.error(f"Error: Error extract Label Entity '{label_entity.mention_text}' bounding box。")
         return None
 
@@ -523,8 +536,8 @@ def infer_signature_area_bbox(
             # Re-check width after boundary adjustments
             final_width = sig_xmax - sig_xmin
             if final_width < min_sig_width * 0.9: # Allow slight tolerance
-                 if enable_debug_prints: st.warning(f"Warning: '{scene}' Expanded Width ({final_width}) still narrow than  ~{min_sig_width}。")
-                #  logging.warning(f"Warning: '{scene}' Expanded Width ({final_width}) still narrow than  ~{min_sig_width}。"
+                 if enable_debug_prints: st.warning(f":warning: Warning: '{scene}' Expanded Width ({final_width}) still narrow than  ~{min_sig_width}。")
+                #  logging.warning(f"Warning: '{scene}' Expanded Width ({final_width}) still narrow than  ~{min_sig_width}。")
             scene += "_expand_width"
             if enable_debug_prints: st.info(f"  '{scene}' Width expanded from {current_width} to -> {final_width} (Target: {min_req_width}) => xmin={sig_xmin}, xmax={sig_xmax}")
             # logging.info(f"  '{scene}' Width expanded from {current_width} to -> {final_width} (Target: {min_req_width}) => xmin={sig_xmin}, xmax={sig_xmax}")
@@ -769,7 +782,8 @@ def process_document_ai(file_path: str) -> Optional[documentai.Document]:
              elif ext == ".tiff" or ext == ".tif": mime_type = "image/tiff"
              else: raise ValueError(f"File type not sure: {file_path}")
 
-        st.info(f"Handling : {file_path}, MIME type: {mime_type}")
+        st.success(f"""Handling: {file_path}
+        \nMIME type: {mime_type}""", icon="✅")
 
         # Check supported MIME types
         supported_types = ["application/pdf", "image/jpeg", "image/png", "image/jpg", "image/tiff"]
@@ -791,14 +805,69 @@ def process_document_ai(file_path: str) -> Optional[documentai.Document]:
             # skip_human_review=True # Set to True if you don't use Human-in-the-Loop
         )
 
-        st.info("Using Document AI Process API...")
+        progress_text = "Kdan AI processing in progress. Please wait..."
+        my_bar = st.progress(0, text=progress_text)
+        
+        for percent_complete in range(50):  # 先顯示一半的進度
+            time.sleep(0.02)  # 較短的延遲，讓動畫更快
+            my_bar.progress(percent_complete + 1, text=progress_text)
+        
         result = documentai_client.process_document(request=request)
-        st.success("Document AI is finished。")
+        
+        for percent_complete in range(50, 100):
+            time.sleep(0.01)  # 較短的延遲
+            my_bar.progress(percent_complete + 1, text=progress_text)
+        
+        time.sleep(0.5)
+        my_bar.empty()
+        st.success("Kdan AI processing completed successfully! 🎉")
+        
         return result.document
 
     except Exception as e:
         st.error(f"Handling {file_path} Error: {e}")
         return None
+
+def send_feedback_to_bigquery(metadata: Dict):
+    """Send feedback and metadata to BigQuery."""
+    from google.cloud import bigquery
+    
+    # Initialize BigQuery client
+    client = bigquery.Client()
+    
+    # Specify your BigQuery dataset and table
+    project_id = "kdan-it-playground"
+    dataset_id = "test_bennett"
+    table_id = "streamlit_signature_detection"
+    full_table_id = f"{project_id}.{dataset_id}.{table_id}"
+    
+    # Check if table exists, if not create it
+    try:
+        client.get_table(full_table_id)
+    except Exception:
+        # Table doesn't exist, create it with schema
+        schema = [
+            bigquery.SchemaField("document_id", "STRING", mode="REQUIRED"),
+            bigquery.SchemaField("feedback", "STRING", mode="REQUIRED"),
+            bigquery.SchemaField("timestamp", "TIMESTAMP", mode="REQUIRED"),
+            bigquery.SchemaField("results", "STRING", mode="NULLABLE"),
+            bigquery.SchemaField("comment", "STRING", mode="NULLABLE")
+        ]
+        
+        # Create the table
+        table = bigquery.Table(full_table_id, schema=schema)
+        table = client.create_table(table)  # Make an API request
+        st.success(f"Created table {full_table_id}")
+    
+    # Insert data into BigQuery
+    errors = client.insert_rows_json(
+        full_table_id, 
+        [metadata]
+    )
+    
+    if errors:
+        raise Exception(f"Errors inserting rows to BigQuery: {errors}")
+    return True
 
 def extract_and_infer_signature_areas(document: documentai.Document) -> Tuple[List[Dict], Dict]:
     results = []
@@ -905,12 +974,85 @@ def extract_and_infer_signature_areas(document: documentai.Document) -> Tuple[Li
         st.info(f"Successfully inferred {processed_entity_count} signature regions.")
     return results, doc_ai_dimensions
 
+# Initialize session state variables if they don't exist
+if 'uploaded_file' not in st.session_state:
+    st.session_state.uploaded_file = None
+if 'feedback_data' not in st.session_state:
+    st.session_state.feedback_data = {}
+if 'results' not in st.session_state:
+    st.session_state.results = None
+if 'doc_dimensions' not in st.session_state:
+    st.session_state.doc_dimensions = None
+if 'current_processed_results' not in st.session_state:
+    st.session_state.current_processed_results = None
+if 'current_file_path' not in st.session_state:
+    st.session_state.current_file_path = None
+if 'feedback_submitted' not in st.session_state:
+    st.session_state.feedback_submitted = False
+if 'feedback_value' not in st.session_state:
+    st.session_state.feedback_value = None
+if 'feedback_comment' not in st.session_state:
+    st.session_state.feedback_comment = ""
+
+# Callback function for handling feedback
+def handle_document_feedback(feedback, comment, doc_id, processed_results):
+    """Function to handle document-level feedback submission"""
+    feedback_key = f"feedback_doc_{doc_id}"
+    
+    if feedback is not None:
+        # Prepare metadata for BigQuery
+        current_time = datetime.now(pytz.timezone('Asia/Taipei')).isoformat()
+        
+        metadata = {
+            "document_id": doc_id,
+            "feedback": feedback,
+            "comment": comment,
+            "timestamp": current_time,
+            "results": str(processed_results)  
+        }
+        
+        # Store in session state
+        st.session_state.feedback_data[feedback_key] = metadata
+        
+        # Send metadata to BigQuery
+        try:
+            send_feedback_to_bigquery(metadata)
+            st.toast("Feedback successfully recorded!", icon="✅")
+            return True
+        except Exception as e:
+            st.toast(f"Feedback recording failed: {str(e)}", icon=":x:")
+            return False
+    return None
+
+def process_feedback():
+    """處理反饋提交的回調函數"""
+    # 從session state中獲取需要的值
+    feedback = st.session_state.feedback_value
+    comment = st.session_state.feedback_comment
+    
+    # 檢查是否有保存的處理結果
+    if st.session_state.current_processed_results is not None and st.session_state.current_file_path is not None:
+        doc_id = os.path.basename(st.session_state.current_file_path)
+        
+        # 處理反饋
+        if feedback is not None:
+            success = handle_document_feedback(feedback, comment, doc_id, st.session_state.current_processed_results)
+            if success:
+                # 設置提交標誌
+                st.session_state.feedback_submitted = True
+
+# Function to handle starting the processing
+def start_processing():
+    # No need to set any flags, the button click will trigger rerun
+    pass
+
 # --- Main Processing Logic ---
 if st.session_state.uploaded_file:
     st.text(f"已選擇文件：{st.session_state.uploaded_file.name}")
     col1, col2 = st.columns(2)
     with col1:
         if st.button("開始"):
+            # Process the file when button is clicked
             if file_source == "Upload File" and st.session_state.uploaded_file:
                 file_bytes = st.session_state.uploaded_file.read()
                 file_extension = os.path.splitext(st.session_state.uploaded_file.name)[1]
@@ -928,6 +1070,7 @@ if st.session_state.uploaded_file:
                 file_path = tmp_file.name
             if file_source == "Upload File" and not (os.path.isfile(".env") or os.getenv("ENV") == "dev"):
                 try:
+                    doc_id = os.path.basename(file_path)
                     bucket = storage_client.bucket(BUCKET_NAME)
                     now = datetime.now()
                     upload_date = now.strftime("%Y%m%d")
@@ -935,13 +1078,13 @@ if st.session_state.uploaded_file:
                     mime_type, _ = mimetypes.guess_type(st.session_state.uploaded_file.name)
                     file_type = "pdf" if mime_type == "application/pdf" else "image"
                     original_filename = st.session_state.uploaded_file.name
-                    gcs_blob_name = f"streamlit_dataset/{upload_date}/{file_type}/{timestamp}_{original_filename}"
+                    gcs_blob_name = f"streamlit_dataset/{upload_date}/{file_type}/{timestamp}_{doc_id}"
                     blob = bucket.blob(gcs_blob_name)
                     blob.upload_from_filename(file_path)
                     st.session_state.gcs_path = f"gs://{BUCKET_NAME}/{gcs_blob_name}"
-                    st.success(f"File uploaded to GCS: {st.session_state.gcs_path}")
+                    st.success(f"文件已上傳至 GCS: {st.session_state.gcs_path}")
                 except Exception as e:
-                    st.error(f"Failed to upload file to GCS: {e}")
+                    st.error(f"無法上傳文件至 GCS: {e}")
 
             # --- Adjusted Visualization for Streamlit ---
             def visualize_results(file_path: str, processed_results: List[Dict], doc_ai_dimensions: Dict,
@@ -995,8 +1138,14 @@ if st.session_state.uploaded_file:
                 for page_num, img_cv in enumerate(images_cv):
                     # Basic check on loaded image page
                     if img_cv is None or img_cv.size == 0:
-                        st.warning(f"Warning: Image data for page {page_num} is invalid, skipping.")
+                        st.warning(f"警告: 頁面 {page_num} 的圖像數據無效，跳過。")
                         continue
+                        
+                    # Set up feedback collection for this page
+                    feedback_key = f"feedback_page_{page_num}"
+                    
+                    # Get results from session state if available
+                    processed_results = st.session_state.results if st.session_state.results is not None else []
 
                     # Ensure image is in BGR format for cv2 drawing functions
                     try:
@@ -1011,11 +1160,11 @@ if st.session_state.uploaded_file:
                         if len(img_cv.shape) < 3 or img_cv.shape[2] != 3:
                             raise ValueError("Unable to convert image to 3-channel BGR format")
                     except Exception as convert_err:
-                        st.error(f"Error: Unable to convert page {page_num} to BGR format: {convert_err}, skipping.")
+                        st.error(f"Error: Unable to convert page {page_num+1} to BGR format: {convert_err}, skipping.")
                         continue
 
                     vis_height, vis_width, _ = img_cv.shape
-                    st.info(f"--- Visualizing page {page_num} ---")
+                    st.write(f"--- Visualizing page {page_num+1} ---")
                     if enable_debug_prints:
                         st.info(f"  Actual image dimensions (after rendering/loading): {vis_width}x{vis_height}")
                     doc_page_width = None
@@ -1039,14 +1188,14 @@ if st.session_state.uploaded_file:
                             else:
                                 st.warning(f"  Dimensions match, scaling factor is 1.0")
                         else:
-                            st.warning(f"Warning: DocAI dimension information for page {page_num} is invalid. Assuming scaling factor of 1.0.")
+                            st.warning(f"Warning: DocAI dimension information for page {page_num + 1} is invalid. Assuming scaling factor of 1.0.")
                             doc_page_width, doc_page_height = vis_width, vis_height 
                     else:
-                        st.warning(f"Warning: No DocAI dimension information found for page {page_num}. Assuming scaling factor of 1.0.")
+                        st.warning(f"Warning: No DocAI dimension information found for page {page_num + 1}. Assuming scaling factor of 1.0.")
                         doc_page_width, doc_page_height = vis_width, vis_height
                     page_results = [res for res in processed_results if res.get("page") == page_num]
                     if not page_results:
-                        st.info(f"Page {page_num} has no detection results to draw.")
+                        st.write(f"Page {page_num + 1} has no detection results to draw.")
                         # continue # Skip to next page if no results for this one
 
                     # Create a copy of the image to draw on
@@ -1216,33 +1365,69 @@ if st.session_state.uploaded_file:
                     # --- Display image page using Streamlit ---
                     try:
                         st.image(img_to_show, caption=f"Page {page_num + 1} - Signature Area Inference (DocAI Label: Red, Post-Processing: Green)")
-                        st.info(f"--- Visualization of page {page_num} completed ---")
                     except Exception as plot_err:
                         st.error(f"Error: Failed to display page {page_num} with Streamlit: {plot_err}")
-
+                
             # --- Process and Display ---
-            with st.spinner("ANALYSING..."):
+            with st.spinner("正在分析文件..."):
                 document = process_document_ai(file_path)
                 if document:
                     processed_results, doc_ai_dimensions = extract_and_infer_signature_areas(document)
-                    boxes = processed_results  # Already in the required format
-                    st.session_state.boxes = boxes
-                    st.subheader("Visualization")
-                    visualize_results(file_path, boxes, doc_ai_dimensions)
-                    if boxes:
-                        st.success("SUCCESSFULLY DETECTED SIGNATURE FIELDS!")
-                        st.text("Bounding Boxes:")
-                        st.write(boxes)
-                    else:
-                        st.warning("沒找到簽名欄位，或者處理過程中出了點問題。")
+                    # Store results in session state
+                    st.session_state.results = processed_results
+                    st.session_state.doc_dimensions = doc_ai_dimensions
+                    st.session_state.current_processed_results = processed_results
+                    st.session_state.current_file_path = file_path
                 else:
-                    st.error("Failed to process document with Document AI.")
+                    st.error("無法通過 Document AI 處理文件")
+                    st.stop()
+                    
+            # Use the results
+            boxes = st.session_state.results
+            doc_ai_dimensions = st.session_state.doc_dimensions
+                
+            st.subheader(":the_horns: Kdan AI result")
+            visualize_results(file_path, boxes, doc_ai_dimensions)
+            if boxes:
+                st.success(":the_horns: **Signature area detected!** :the_horns:")
+                st.text("Bounding Box:")
+                st.write(boxes)
+            else:
+                st.warning("rolling_on_the_floor_laughing: No signature detected or processing error. rolling_on_the_floor_laughing:")
 
+            # --- Feedback Section ---
+            st.subheader(":thinking_face: **Feedback** :thinking_face: ")
+            st.caption("請大力鞭策！")
+            doc_id = os.path.basename(st.session_state.current_file_path)
+            feedback_key = f"feedback_doc_{doc_id}"
+            
+            if feedback_key in st.session_state.feedback_data:
+                previous_feedback = st.session_state.feedback_data[feedback_key]['feedback']
+                st.info(f"Previous Feedback: {previous_feedback}")
+            
+            # Create a form for unified document feedback
+            with st.form(key="feedback_form_doc"):
+                st.caption("**Your feedback is important to us!!! :heart:**")
+                feedback = st.feedback("thumbs", key="feedback_value")
+                comment = st.text_area("Comment (Optional)", key="feedback_comment")
+                submitted = st.form_submit_button("Submit Feedback", on_click=process_feedback)
+            
+            if st.session_state.feedback_submitted:
+                st.success("Feedback submitted and logged!")
+                st.session_state.feedback_submitted = False
     with col2:
         if st.button("Clear"):
+            # Reset all relevant session state variables
             st.session_state.uploaded_file = None
             st.session_state.boxes = None
             st.session_state.gcs_path = None
             st.session_state.uploader_key = f"doc_upload_{datetime.now().strftime('%Y%m%d%H%M%S')}"
             st.session_state.file_source = "Upload File" # Reset file source to default
+            st.session_state.process_started = False
+            st.session_state.processing_complete = False
+            st.session_state.feedback_data = {}
+            # Clear all keys that start with 'processed_file_' or 'feedback_page_'
+            keys_to_clear = [k for k in st.session_state.keys() if k.startswith('processed_file_') or k.startswith('feedback_page_')]
+            for key in keys_to_clear:
+                del st.session_state[key]
             st.rerun()
