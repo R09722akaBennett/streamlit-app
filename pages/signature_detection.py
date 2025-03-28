@@ -146,64 +146,6 @@ elif file_source == "Use Default File":
         st.error(f":x: Default file path error: {default_file_path}")
         st.stop()
 
-# --- Core Functions from Your Code (Unchanged) ---
-def extract_signature_blank(image: np.ndarray, bbox: Tuple[int, int, int, int], blank_width_factor: float = 1.0, min_blank_width: int = 20) -> Optional[List[Tuple[int, int, int, int]]]:
-    try:
-        # Crop Signature field
-        x1, y1, x2, y2 = bbox
-        if x2 <= x1 or y2 <= y1 or x1 < 0 or y1 < 0:
-            st.warning(f":pushpin: Warning: Invalid Signature field Bounding Box : {bbox}")
-            return None
-
-        height, width = image.shape[:2]
-        x1 = max(0, x1)
-        y1 = max(0, y1)
-        x2 = min(width, x2)
-        y2 = min(height, y2)
-        if x2 <= x1 or y2 <= y1:
-            st.warning(f":pushpin: Warning: Invalid Signature field Bounding Box : ({x1}, {y1}, {x2}, {y2})")
-            return None
-
-        signature_area = image[y1:y2, x1:x2]
-
-        # 轉為灰度圖
-        gray = cv2.cvtColor(signature_area, cv2.COLOR_BGR2GRAY)
-
-        # adaptiveThreshold to get the text area
-        binary = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                                       cv2.THRESH_BINARY_INV, 11, 2)
-
-        # calcalute projection for the 分界線 between text and blank area
-        projection = np.sum(binary, axis=0)
-        text_end = np.argmax(projection > 0) + 10  # 10 is for buffering 
-
-        # If there is no text at the end , assume blank is satart from middle
-        if text_end >= (x2 - x1):
-            text_end = int((x2 - x1) / 2)
-
-        # calculate blank area size
-        blank_x1 = x1 + text_end
-        blank_x2 = x2
-        blank_width = blank_x2 - blank_x1
-        if blank_width < min_blank_width:
-            blank_x1 = x2 - min_blank_width
-            blank_x1 = max(x1, blank_x1)  
-
-        # assume the height is same with the signature field
-        blank_y1 = y1
-        blank_y2 = y2
-
-        # Check
-        if blank_x2 <= blank_x1 or blank_y2 <= blank_y1:
-            st.warning(f":pushpin: Warning: Invalid blank Bounding Box :  ({blank_x1}, {blank_y1}, {blank_x2}, {blank_y2})")
-            return None
-
-        return [(blank_x1, blank_y1, blank_x2, blank_y2)] # Return signature blank bounding box
-
-    except Exception as e:
-        st.error(f":x: Error : extract_signature_blank: {e}, BBox: {bbox}")
-        return None
-
 def get_pixel_bbox(normalized_vertices: List[documentai.NormalizedVertex], page_width: int, page_height: int) -> Optional[Tuple[int, int, int, int]]:
     if not normalized_vertices:
         st.warning(f":pushpin: Warning : Empty normalized_vertices。")
@@ -386,11 +328,6 @@ def infer_signature_area_bbox(
     nearest_token_max_dist: int = 1000, # max distance
     nearest_token_y_factor: float = 0.75, # vertical tolerance factor
 
-    # --- Constants for 'right_colon_with_newline_paren' scenario ---
-    # etc bounding box = 甲方:__________(簽章) --> to find the blank area between token
-    # 換行或空格後跟著括號，例如 "\n(簽章)" 或 " (簽名)"
-    NEWLINE_PAREN_PATTERN = re.compile(r"(\n|\s+)\([^()]+?\)"),
-
     # --- Parameters for 'below' case ---
     BELOW_LABEL_KEYWORDS = ["簽章", "簽名", "蓋章", "Signature"] ,
     signature_area_height_factor_below: float = 1.8, # How many times the label height for the signature area height below
@@ -400,9 +337,8 @@ def infer_signature_area_bbox(
     # --- General Scenario
     _HORIZONTAL_MARGIN = 5,
     _MIN_INFERRED_HEIGHT = 15, # Minimum height for signature area
-
-    # --- New parameter for image-based blank detection ---
-    image: Optional[np.ndarray] = None,  # 原始圖像，用於二值化提取空白區域
+    paren_sig_width_percent: float = 0.5,
+    paren_sig_min_width: int = 50,
 ) -> Optional[Tuple[Tuple[int, int, int, int], str]]:
 
     # --- Get Label BBox ---
@@ -544,7 +480,38 @@ def infer_signature_area_bbox(
         else:
              if enable_debug_prints: st.info(f"  '{scene}' Horizontal: x_min={sig_xmin}, x_max={sig_xmax} (Width {current_width} >= {min_req_width})")
             #  logging.info(f"  '{scene}' Horizontal: x_min={sig_xmin}, x_max={sig_xmax} (Width {current_width} >= {min_req_width})")
+    
+    elif ((':' in label_text or '：' in label_text) and '(' in label_text and ')' in label_text):
+        scene = "right_colon_with_paren"
+        if enable_debug_prints: st.info(f"scenario: {scene}")
 
+        # --- Get label dimensions ---
+        label_width = lx_max - lx_min
+        label_height = ly_max - ly_min
+        
+        # --- Calculate signature box position (centered in the label) ---
+        # Center point of the label
+        center_x = (lx_min + lx_max) / 2
+        center_y = (ly_min + ly_max) / 2
+        
+        # Calculate signature width (percentage of label width, with minimum)
+        sig_width = max(label_width * paren_sig_width_percent, paren_sig_min_width)
+        
+        # Calculate signature height (based on label height)
+        sig_height = max(label_height * signature_area_height_factor, _MIN_INFERRED_HEIGHT)
+        
+        # Calculate signature box coordinates (centered on label center)
+        sig_xmin = int(center_x - sig_width / 2)
+        sig_xmax = int(center_x + sig_width / 2)
+        sig_ymin = int(center_y - sig_height / 2)
+        sig_ymax = int(center_y + sig_height / 2)
+        
+        if enable_debug_prints:
+            st.info(f"  Using centered approach for '{scene}'")
+            st.info(f"  Label dimensions: width={label_width}, height={label_height}")
+            st.info(f"  Center point: ({center_x}, {center_y})")
+            st.info(f"  Signature area: ({sig_xmin}, {sig_ymin}, {sig_xmax}, {sig_ymax})")
+            st.info(f"  Signature dimensions: width={sig_width}, height={sig_height}")
 
     # 2. Check for Horizontal Scenarios 
     # Scenario of right colon 簽名:______, 簽章:     
@@ -569,63 +536,7 @@ def infer_signature_area_bbox(
             y_tolerance_factor=nearest_token_y_factor,
             debug_mode=enable_debug_prints
         )
-        # Check whether is 簽名: _______ (簽章) 文字間
-        is_newline_paren_case = False
         if nearest_right_token:
-            nr_text = nearest_right_token["text"]
-            # check : 附近時不是括弧
-            if NEWLINE_PAREN_PATTERN.search(nr_text):
-                is_newline_paren_case = True
-                scene = "right_colon_with_text"
-                if enable_debug_prints: st.info(f"  This is '{scene}' scenario: '{nr_text}'")
-
-                # Use extract_signature_blank 
-                if image is not None:
-                  # define search area  from the right of the label to the right of the token
-                    search_xmin = lx_max
-                    search_xmax = nearest_right_token["bbox"][2]  
-                    search_ymin = sig_ymin
-                    search_ymax = sig_ymax
-                    search_bbox = (search_xmin, search_ymin, search_xmax, search_ymax)
-
-                    if enable_debug_prints:
-                        st.info(f"  Using adaptiveThreshold search area: {search_bbox}")
-                        # logging.info(f"  Using adaptiveThreshold search area: {search_bbox}")
-
-                    blank_bboxes = extract_signature_blank(
-                        image=image,
-                        bbox=search_bbox,
-                        blank_width_factor=1.0,
-                        min_blank_width=min_sig_width
-                    )
-
-                    if blank_bboxes and len(blank_bboxes) > 0:
-                        blank_xmin, blank_ymin, blank_xmax, blank_ymax = blank_bboxes[0]
-                        # use blank boundingboxes coordinate
-                        sig_xmin = blank_xmin
-                        sig_xmax = blank_xmax
-                        sig_ymin = blank_ymin
-                        sig_ymax = blank_ymax
-                        if enable_debug_prints:
-                            st.info(f"  adaptiveThreshold for the blank area: ({sig_xmin}, {sig_ymin}, {sig_xmax}, {sig_ymax})")
-                    else:
-                        if enable_debug_prints:
-                            st.info(f"  adaptiveThreshold failed，Using default scenario")
-                            # logging.info(f"  adaptiveThreshold failed，Using default scenario")
-                        is_newline_paren_case = False
-                        scene = "right_colon"
-                else:
-                    if enable_debug_prints:
-                        st.info(f"  Unable to use the image，adaptiveThreshold failed，Using default scenario")
-                        # logging.info(f"  Unable to use the image，adaptiveThreshold failed，Using default scenario")
-                    is_newline_paren_case = False
-                    scene = "right_colon"
-
-        if is_newline_paren_case and sig_xmin != -1 and sig_xmax != -1:
-            # adaptiveThreshold success sig_xmin 和 sig_xmax
-            if enable_debug_prints:
-                st.info(f"  '{scene}' adaptiveThreshold generate blank area: sig_xmin={sig_xmin}, sig_xmax={sig_xmax}")
-        elif nearest_right_token:
             nr_bbox = nearest_right_token["bbox"]
             # Adjust the width 
             sig_xmax = max(sig_xmin + min_sig_width // 2, nr_bbox[0] - horizontal_margin)
@@ -714,6 +625,8 @@ def infer_signature_area_bbox(
 
          if scene.startswith("left"): # Expand left if it was a left-based rule
              sig_xmin = max(0, sig_xmax - min_sig_width)
+         elif scene.startswith("right_colon_with_paren"): # Expand right if it was a right-based rule
+             pass 
          else: # Default expand right
              sig_xmax = min(page_width, sig_xmin + min_sig_width)
          # If still too narrow (page too small), it is what it is
@@ -724,7 +637,6 @@ def infer_signature_area_bbox(
               scene += "_final_min_width_fix"
               if enable_debug_prints: st.write(f"  Width fixed: xmin={sig_xmin}, xmax={sig_xmax}")
               # logging.info(f"  Width fixed: xmin={sig_xmin}, xmax={sig_xmax}")
-
 
     # Clip final coordinates to page boundaries
     sig_xmin = max(0, sig_xmin)
@@ -821,7 +733,7 @@ def process_document_ai(file_path: str) -> Optional[documentai.Document]:
         time.sleep(0.5)
         my_bar.empty()
         st.success("Kdan AI processing completed successfully! 🎉")
-        
+
         return result.document
 
     except Exception as e:
@@ -1285,6 +1197,11 @@ if st.session_state.uploaded_file:
                                             ix_vis = ix_vis_scaled
                                             ix2_vis = ix2_vis_scaled
 
+                                    elif inferred_rule.startswith("right_colon_with_paren"):
+                                        ix_vis = ix_docai * scale_x
+                                        ix2_vis = ix2_docai * scale_x
+                                        iy_vis = iy_docai * scale_y
+                                        iy2_vis = iy2_docai * scale_y
 
                                     elif inferred_rule.startswith("right") or inferred_rule.startswith("fallback"):
                                         # Horizontal position based on VISUAL label right + scaled margin
@@ -1369,8 +1286,8 @@ if st.session_state.uploaded_file:
                         st.image(img_to_show_rgb, caption=f"Page {page_num + 1} - Signature Area Inference (DocAI Label: Red, Post-Processing: Green)")
                     except Exception as plot_err:
                         st.error(f"Error: Failed to display page {page_num} with Streamlit: {plot_err}")
-                
             document = process_document_ai(file_path)
+                
             if document:
                 processed_results, doc_ai_dimensions = extract_and_infer_signature_areas(document)
                 # Store results in session state
