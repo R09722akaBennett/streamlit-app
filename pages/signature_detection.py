@@ -1094,7 +1094,7 @@ if st.session_state.uploaded_file:
                       min_width_factor_below=3.0):
                 """Visualize processed_results, recalculating coordinates based on the actual image dimensions for drawing."""
                 if not os.path.exists(file_path):
-                    print(f"Error: Visualization file does not exist {file_path}")
+                    st.error(f":x: Error: Visualization file does not exist {file_path}")
                     # logging.error(f"Error: Visualization file does not exist {file_path}")
                     return
 
@@ -1108,11 +1108,12 @@ if st.session_state.uploaded_file:
                     elif ext == ".png": mime_type = "image/png"
                     elif ext == ".tiff" or ext == ".tif": mime_type = "image/tiff"
                     else:
-                        print(f"Error: Unable to determine MIME type for visualization file: {file_path}")
+                        st.error(f":x: Error: Unable to determine MIME type for visualization file: {file_path}")
                         # logging.error(f"Error: Unable to determine MIME type for visualization file: {file_path}")
                     return
+                if enable_debug_prints:
+                    st.info(f"\nStarting visualization of file: {file_path} (type: {mime_type})")
 
-                print(f"\nStarting visualization of file: {file_path} (type: {mime_type})")
                 images_cv = []
                 try: # Load file into OpenCV image(s)
                     if mime_type == "application/pdf":
@@ -1129,10 +1130,10 @@ if st.session_state.uploaded_file:
                     else:
                         raise ValueError(f"Unsupported visualization file type: {mime_type}")
                 except Exception as e:
-                    st.error(f"Failed to load image file: {e}")
+                    st.error(f":x: Failed to load image file: {e}")
                     return
                 if not images_cv:
-                    st.error(f"Error: Failed to load any image pages from {file_path} for visualization.")
+                    st.error(f":x: Error: Failed to load any image pages from {file_path} for visualization.")
                     return
 
                 for page_num, img_cv in enumerate(images_cv):
@@ -1364,23 +1365,22 @@ if st.session_state.uploaded_file:
 
                     # --- Display image page using Streamlit ---
                     try:
-                        st.image(img_to_show, caption=f"Page {page_num + 1} - Signature Area Inference (DocAI Label: Red, Post-Processing: Green)")
+                        img_to_show_rgb = cv2.cvtColor(img_to_show, cv2.COLOR_BGR2RGB)
+                        st.image(img_to_show_rgb, caption=f"Page {page_num + 1} - Signature Area Inference (DocAI Label: Red, Post-Processing: Green)")
                     except Exception as plot_err:
                         st.error(f"Error: Failed to display page {page_num} with Streamlit: {plot_err}")
                 
-            # --- Process and Display ---
-            with st.spinner("正在分析文件..."):
-                document = process_document_ai(file_path)
-                if document:
-                    processed_results, doc_ai_dimensions = extract_and_infer_signature_areas(document)
-                    # Store results in session state
-                    st.session_state.results = processed_results
-                    st.session_state.doc_dimensions = doc_ai_dimensions
-                    st.session_state.current_processed_results = processed_results
-                    st.session_state.current_file_path = file_path
-                else:
-                    st.error("無法通過 Document AI 處理文件")
-                    st.stop()
+            document = process_document_ai(file_path)
+            if document:
+                processed_results, doc_ai_dimensions = extract_and_infer_signature_areas(document)
+                # Store results in session state
+                st.session_state.results = processed_results
+                st.session_state.doc_dimensions = doc_ai_dimensions
+                st.session_state.current_processed_results = processed_results
+                st.session_state.current_file_path = file_path
+            else:
+                st.error("Failed to process document with Kdan AI")
+                st.stop()
                     
             # Use the results
             boxes = st.session_state.results
