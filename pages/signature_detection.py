@@ -11,7 +11,6 @@ import tempfile
 from dotenv import load_dotenv
 from datetime import datetime
 from typing import List, Dict, Tuple, Optional
-import matplotlib.pyplot as plt
 import re
 
 load_dotenv()
