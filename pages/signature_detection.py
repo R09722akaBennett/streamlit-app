@@ -190,6 +190,7 @@ def get_pixel_bbox(normalized_vertices: List[documentai.NormalizedVertex], page_
         st.error(f":x: Error: Calculation get_pixel_bbox : {e}, vertices: {normalized_vertices}")
         return None
 
+## TODO
 def get_page_tokens(page: documentai.Document.Page, page_width: int, page_height: int) -> List[Dict]:
     """Extract tokens and pixel bounding box from all pages."""
     tokens = []
@@ -199,9 +200,11 @@ def get_page_tokens(page: documentai.Document.Page, page_width: int, page_height
 
     for token in page.tokens:
         # Basic validation, if 少資料then skip
-        if not token.layout or not token.layout.text_anchor or not token.layout.text_anchor.content: continue
+        if not token.layout or not token.layout.text_anchor or not token.layout.text_anchor.content: 
+          continue
         text = token.layout.text_anchor.content
-        if not token.layout.bounding_poly or not token.layout.bounding_poly.normalized_vertices: continue
+        if not token.layout.bounding_poly or not token.layout.bounding_poly.normalized_vertices: 
+          continue
         
         # Calculate pixel box 
         pixel_bbox = get_pixel_bbox(token.layout.bounding_poly.normalized_vertices, page_width, page_height)
@@ -215,14 +218,144 @@ def get_page_tokens(page: documentai.Document.Page, page_width: int, page_height
                 })
     return tokens
 
+def calculate_dynamic_min_sig_width(page_tokens: List[Dict], page_width: int) -> int:
+    """
+    Dynamically calculate min_sig_width based on average token height on the page.
+    根據頁面 token 的平均高度，動態計算簽名區域的最小寬度。
+    
+    Args:
+        page_tokens: List of tokens on the page, each containing bbox information.
+        page_width: Page width in pixels.
+    
+    Returns:
+        Dynamically calculated min_sig_width in pixels.
+    """
+    if not page_tokens:
+        return 50  # Default value
+
+    # Calculate heights of all tokens
+    heights = [token["bbox"][3] - token["bbox"][1] for token in page_tokens]
+    avg_height = sum(heights) / len(heights) if heights else 20  # Avoid division by zero
+
+    # Assume signature width is 3 times the average token height
+    # 假設簽名寬度是平均高度的 3 倍
+    dynamic_min_sig_width = int(avg_height * 3)
+
+    # Set upper and lower limits based on page width
+    # 根據頁面寬度設置上下限
+    min_limit = 30  # Minimum 30 pixels
+    max_limit = min(150, page_width * 0.1)  # Maximum 150 pixels or 10% of page width
+    dynamic_min_sig_width = max(min_limit, min(dynamic_min_sig_width, max_limit))
+
+    if enable_debug_prints:
+        st.info(f"Dynamic min_sig_width: {dynamic_min_sig_width} (avg_height={avg_height:.1f}, page_width={page_width})")
+    return dynamic_min_sig_width
+
+def calculate_dynamic_y_tolerance(page_tokens: List[Dict]) -> float:
+    """
+    Dynamically calculate y_tolerance_factor based on vertical distribution of tokens on the page.
+    根據頁面 token 的垂直分佈，動態計算垂直容差因子。
+    
+    Args:
+        page_tokens: List of tokens on the page, each containing bbox information.
+    
+    Returns:
+        Dynamically calculated y_tolerance_factor.
+    """
+    if not page_tokens:
+        return 0.7  # Default value
+
+    # Calculate heights of all tokens
+    # 計算所有 token 的高度
+    heights = [token["bbox"][3] - token["bbox"][1] for token in page_tokens]
+    avg_height = sum(heights) / len(heights) if heights else 20
+
+    # Calculate and sort vertical center points
+    # 計算垂直中心點並排序
+    y_centers = sorted([(token["bbox"][1] + token["bbox"][3]) / 2 for token in page_tokens])
+    y_diffs = [y_centers[i+1] - y_centers[i] for i in range(len(y_centers)-1)]
+    avg_y_diff = sum(y_diffs) / len(y_diffs) if y_diffs else avg_height
+
+    # Calculate y_tolerance_factor: ratio of line spacing to average height
+    # 計算 y_tolerance_factor：行間距與平均高度的比值
+    y_tolerance_factor = avg_y_diff / avg_height
+    y_tolerance_factor = max(0.5, min(1.0, y_tolerance_factor))  # Limit the range
+
+    if enable_debug_prints:
+        st.info(f"Dynamic y_tolerance_factor: {y_tolerance_factor:.2f} (avg_y_diff={avg_y_diff:.1f}, avg_height={avg_height:.1f})")
+    return y_tolerance_factor
+
+def calculate_dynamic_max_horizontal_dist(page_tokens: List[Dict], page_width: int) -> int:
+    """
+    Dynamically calculate max_horizontal_dist based on page width and horizontal distribution of tokens.
+    根據頁面寬度和 token 的水平分佈，動態計算最大水平距離。
+    
+    Args:
+        page_tokens: List of tokens on the page, each containing bbox information.
+        page_width: Page width in pixels.
+    
+    Returns:
+        Dynamically calculated max_horizontal_dist in pixels.
+    """
+    if not page_tokens:
+        return 800  # Default value
+
+    # Calculate and sort horizontal center points of tokens
+    # 計算 token 的水平中心點並排序
+    x_centers = sorted([(token["bbox"][0] + token["bbox"][2]) / 2 for token in page_tokens])
+    x_diffs = [x_centers[i+1] - x_centers[i] for i in range(len(x_centers)-1)]
+    avg_x_diff = sum(x_diffs) / len(x_diffs) if x_diffs else page_width * 0.1
+
+    # 取頁面寬度的 50% 和平均水平間距的 3 倍中的較小值
+    max_dist = min(page_width * 0.5, avg_x_diff * 3)
+    max_dist = max(200, max_dist)  # 最小 200 像素
+
+    if enable_debug_prints:
+        st.info(f"Dynamic max_horizontal_dist: {max_dist} (avg_x_diff={avg_x_diff:.1f}, page_width={page_width})")
+    return int(max_dist)
+
+def calculate_dynamic_height_factor(label_bbox: Tuple[int, int, int, int], page_tokens: List[Dict]) -> float:
+    """
+    Dynamically calculate signature_area_height_factor based on the label height and average token height on the page.
+    根據標籤高度和頁面 token 的平均高度，動態計算簽名區域高度因子。
+    
+    Args:
+        label_bbox: Label's pixel bounding box (xmin, ymin, xmax, ymax).
+        page_tokens: List of tokens on the page.
+    
+    Returns:
+        Dynamically calculated signature_area_height_factor.
+    """
+    if not page_tokens:
+        return 0.8  # Default value
+
+    # Calculate label height
+    _, ly_min, _, ly_max = label_bbox
+    label_height = ly_max - ly_min
+
+    # Calculate average height of page tokens
+    heights = [token["bbox"][3] - token["bbox"][1] for token in page_tokens]
+    avg_height = sum(heights) / len(heights) if heights else 20
+
+    # Adjust based on ratio of label height to average height
+    # 根據標籤高度與平均高度的比值調整
+    height_ratio = label_height / avg_height if avg_height > 0 else 1.0
+    height_factor = 0.8 * height_ratio  # Base value 0.8, adjusted by ratio
+    height_factor = max(0.5, min(1.5, height_factor))  # Limit the range
+
+    if enable_debug_prints:
+        st.info(f"Dynamic signature_area_height_factor: {height_factor:.2f} (label_height={label_height}, avg_height={avg_height:.1f})")
+    return height_factor
+
+
+## TODO
 def find_nearest_token_on_line(
     target_bbox: Tuple[int, int, int, int],
     page_tokens: List[Dict], # Token list
     direction: str = 'right', 
     y_tolerance_factor: float = 0.7, # determine the token row
     max_horizontal_dist: int = 800, # default pixel 
-    ignore_chars: str = ":： ", # Characters to ignore when checking if token is empty
-    debug_mode: bool = False
+    ignore_chars: str = ":： " # Characters to ignore when checking if token is empty
     ) -> Optional[Dict]:
     tx_min, ty_min, tx_max, ty_max = target_bbox
     target_cy = (ty_min + ty_max) / 2 # calculate center point
@@ -232,7 +365,7 @@ def find_nearest_token_on_line(
     nearest_token_info = None # To save the nearest token
     min_dist = float('inf')
 
-    if debug_mode:
+    if enable_debug_prints:
         st.info(f":heavy_multiplication_x: [Debug find_nearest] Target: {target_bbox} CY: {target_cy:.1f}, H: {target_height}, Y-Tol(px): {target_height * y_tolerance_factor:.1f}")
         # logging.info(f"[Debug find_nearest] Target: {target_bbox} CY: {target_cy:.1f}, H: {target_height}, Y-Tol(px): {target_height * y_tolerance_factor:.1f}")
 
@@ -247,7 +380,7 @@ def find_nearest_token_on_line(
 
         # Skip tokens that are effectively empty after stripping ignore_chars
         if not tok_text_stripped:
-            if debug_mode: potential_matches.append({"text": tok_text, "bbox": tok_bbox, "cy": tok_cy, "on_line": False, "reason": "Empty"})
+            if enable_debug_prints: potential_matches.append({"text": tok_text, "bbox": tok_bbox, "cy": tok_cy, "on_line": False, "reason": "Empty"})
             continue
 
         # Check vertical alignment: absolute difference in centers < tolerance
@@ -256,12 +389,12 @@ def find_nearest_token_on_line(
         is_on_line = y_distance < (target_height * y_tolerance_factor)
 
         # For debugging: collect tokens somewhat close vertically
-        if debug_mode and y_distance < (target_height * 1.5):
+        if enable_debug_prints and y_distance < (target_height * 1.5):
              potential_matches.append({
                  "text": tok_text, "bbox": tok_bbox, "cy": tok_cy,
                  "on_line": is_on_line, "dist_y": y_distance, "reason": ""
                  })
-        elif not is_on_line and debug_mode:
+        elif not is_on_line and enable_debug_prints:
              potential_matches.append({"text": tok_text, "bbox": tok_bbox, "cy": tok_cy, "on_line": False, "dist_y": y_distance, "reason": "Off-line"})
 
         # Calculate distance and direction
@@ -289,13 +422,13 @@ def find_nearest_token_on_line(
             if valid_direction and current_distance_metric < max_horizontal_dist and current_distance_metric < min_dist:
                  min_dist = current_distance_metric
                  nearest_token_info = token_info
-                 if debug_mode:
+                 if enable_debug_prints:
                     # Update reason for debug matches
                     for m in potential_matches:
                         if m["bbox"] == tok_bbox: m["reason"] = f"Potential Match (Dist: {current_distance_metric:.1f})"
 
 
-    if debug_mode:
+    if enable_debug_prints:
         st.info(f":heavy_multiplication_x: [Debug find_nearest] Tokens near Target Y:")
         # logging.info(f"[Debug find_nearest] Tokens near Target Y:")
         potential_matches.sort(key=lambda x: x['bbox'][0]) # Sort by x-coordinate
@@ -315,80 +448,106 @@ def find_nearest_token_on_line(
     return nearest_token_info
 
 def infer_signature_area_bbox(
-    label_entity: documentai.Document.Entity, # signature_field label in document ai
-    page_tokens: List[Dict], # token list
-    page_width: int, # page width
-    page_height: int, # page height
-    min_sig_width: int = 50,  # minimun signature of the signature area
-    signature_area_height_factor: float = 0.8,  # Height for horizontal cases
-    enable_debug_prints: bool = False,
-    default_width_factor_of_height: float = 7.0,  # Height for horizontal fallback
-    max_absolute_default_width: int = 450,  # Max abs width for horizontal fallback
-    max_relative_default_width_factor: float = 0.6,  # max relative width for horizontal fallback
-    nearest_token_max_dist: int = 1000, # max distance
-    nearest_token_y_factor: float = 0.75, # vertical tolerance factor
+    label_entity: documentai.Document.Entity, # Signature field label detected by Document AI
+    page_tokens: List[Dict], # List of tokens on the page with their positions
+    page_width: int, # Page width in pixels
+    page_height: int, # Page height in pixels
+    min_sig_width: int = 150,  # Minimum signature area width in pixels
+    signature_area_height_factor: float = 0.8,  # Height factor for horizontal signature areas
+    default_width_factor_of_height: float = 7.0,  # Width factor based on height for horizontal fallback cases
+    max_absolute_default_width: int = 450,  # Maximum absolute width (in pixels) for horizontal fallback
+    max_relative_default_width_factor: float = 0.6,  # Maximum width as a factor of available space
+    nearest_token_max_dist: int = 1000, # Maximum distance to search for nearby tokens (in pixels)
+    nearest_token_y_factor: float = 0.75, # Vertical tolerance factor for finding tokens on the same line
 
-    # --- Parameters for 'below' case ---
-    BELOW_LABEL_KEYWORDS = ["簽章", "簽名", "蓋章", "Signature"] ,
-    signature_area_height_factor_below: float = 1.8, # How many times the label height for the signature area height below
-    min_width_factor_below: float = 3.0 ,# Minimum width relative to label height for the area below
-    vertical_margin_below: int = 10, # Pixels between label bottom and area top , avoid overlap
+    # --- Parameters for 'below' case (when signature area is below the label) ---
+    BELOW_LABEL_KEYWORDS = ["簽章", "簽名", "蓋章", "Signature"] , # Keywords indicating signature fields
+    signature_area_height_factor_below: float = 1.8, # Height multiplier for signature areas below labels
+    min_width_factor_below: float = 3.0 ,# Minimum width relative to label height for below case
+    vertical_margin_below: int = 10, # Vertical margin between label bottom and signature area top
 
-    # --- General Scenario
-    _HORIZONTAL_MARGIN = 5,
-    _MIN_INFERRED_HEIGHT = 15, # Minimum height for signature area
-    paren_sig_width_percent: float = 0.5,
-    paren_sig_min_width: int = 50,
+    # --- General parameters ---
+    _HORIZONTAL_MARGIN = 5, # Horizontal margin in pixels
+    _MIN_INFERRED_HEIGHT = 15, # Minimum inferred height for signature areas
+    paren_sig_width_percent: float = 0.5, # Width percentage for parentheses case
+    paren_sig_min_width: int = 50, # Minimum width for parentheses case
 ) -> Optional[Tuple[Tuple[int, int, int, int], str]]:
+    """
+    Infer the bounding box of a signature area based on the position of a label entity.
+    根據標籤實體的位置推斷簽名區域的邊界框。
+    
+    This function analyzes the document structure around a detected signature label
+    and uses multiple heuristics to determine the most likely location where a signature
+    should be placed, handling various document layouts and formats.
+    
+    Args:
+        label_entity: The signature field label entity detected by Document AI
+        page_tokens: List of tokens on the page with their bounding boxes
+        page_width/height: Dimensions of the page in pixels
+        [Other parameters described in function definition]
+    
+    Returns:
+        A tuple of ((xmin, ymin, xmax, ymax), scene_type) if successful,
+        where scene_type describes which inference rule was used,
+        or None if inference failed
+    """
+    
 
-    # --- Get Label BBox ---
+    # --- Extract the label's bounding box from Document AI entity ---
     if not label_entity.page_anchor or not label_entity.page_anchor.page_refs:
-        if enable_debug_prints: st.warning(f":pushpin: Warining: Label Entity '{label_entity.mention_text}' no page_refs。")
+        if enable_debug_prints: st.info(f":pushpin: Warining: Label Entity '{label_entity.mention_text}' no page_refs。")
         # loggin.warning(f"Warining: Label Entity '{label_entity.mention_text}' no page_refs。")
         return None
-    # First page contain label coordinate details
+    # Get first page reference containing label coordinate details
     page_ref = label_entity.page_anchor.page_refs[0]
 
-    # Use the bounding poly from page_ref for the label
+    # Extract normalized vertices from the page reference
     if not page_ref.bounding_poly or not page_ref.bounding_poly.normalized_vertices:
-         if enable_debug_prints: st.error(f":x: Error: Label Entity '{label_entity.mention_text}'  page_ref has no bounding_poly。")
+         if enable_debug_prints: 
+          st.error(f":x: Error: Label Entity '{label_entity.mention_text}'  page_ref has no bounding_poly。")
         #  logging.error(f"Error: Label Entity '{label_entity.mention_text}'  page_ref has no bounding_poly。")
          return None
-    # Get label coordinate bounding box
+    # Convert normalized vertices to pixel coordinates
     label_bbox = get_pixel_bbox(page_ref.bounding_poly.normalized_vertices, page_width, page_height)
     if label_bbox is None:
-        if enable_debug_prints: st.error(f":x: Error: Error extract Label Entity '{label_entity.mention_text}' bounding box。")
+        if enable_debug_prints: 
+          st.error(f":x: Error: Error extract Label Entity '{label_entity.mention_text}' bounding box。")
         # logging.error(f"Error: Error extract Label Entity '{label_entity.mention_text}' bounding box。")
         return None
 
     # --- Initialize variables ---
     lx_min, ly_min, lx_max, ly_max = label_bbox
     label_text = label_entity.mention_text if label_entity.mention_text else "" # Handle empty mention_text
-    # calculate height
+    # Calculate label height
     line_height = ly_max - ly_min
     if line_height <= 0: line_height = 20 # Avoid division by zero or negative height
     if enable_debug_prints: st.info(f"\Handling Label: '{label_text}', Boundingbox: {label_bbox}, H:{line_height}")
     # logging.info(f"\Handling Label: '{label_text}', Boundingbox: {label_bbox}, H:{line_height}")
 
-    # signature area coordinate (隨便設)
+    # Initialize signature area coordinates (will be populated later)
+    # 初始化簽名區域坐標(後續會填充)
     sig_xmin, sig_ymin, sig_xmax, sig_ymax = -1, -1, -1, -1
-    scene = "unknown"
+    scene = "unknown" # Tracks which inference rule was applied
     horizontal_margin = _HORIZONTAL_MARGIN 
 
     # --- Calculate Dynamic Default Width (Helper for Horizontal Fallback) ---
     def calculate_dynamic_default_width(start_x: int, direction: str) -> int:
-        # If right , the availaible space is from right of the page - start point of x - margin
+        # Calculate available space based on direction
         if direction == 'right':
+             # For right direction: space from start_x to right edge of page minus margin
              available_space = page_width - start_x - horizontal_margin
-        # If left , then start point of the x - margin
         else: # direction == 'left'
+             # For left direction: space from left edge to start_x minus margin
              available_space = start_x - horizontal_margin
 
+        # Calculate initial width based on line height
         dynamic_w = line_height * default_width_factor_of_height
-        # Cap width by absolute max, relative max based on available space (avoid space太大)
+        # Cap width by absolute max and relative max (to avoid excessive width)
+        # 限制寬度以避免空間太大
         capped_w = min(dynamic_w, max_absolute_default_width, max(0, available_space) * max_relative_default_width_factor)
         
-        # Ensure width is at least the minimum required signature width (avoid space太小)
+        # Ensure width is at least the minimum required signature width
+        # 確保寬度不小於最小簽名寬度
         final_w = max(capped_w, min_sig_width)
         if enable_debug_prints:
              st.info(f"    [calculate_dynamic_default_width] StartX:{start_x} Dir:{direction} Avail:{available_space}")
@@ -401,27 +560,29 @@ def infer_signature_area_bbox(
             #  logging.info(f"    Capped W: {capped_w:.0f}, Final W (>=Min {min_sig_width}): {final_w:.0f}")
         return int(final_w) # Return the width that can use 
 
-    # --- Scene Detection ---
-    is_below_case = False
+    # --- Scene Detection: Identify which layout pattern applies ---
+    is_below_case = False  # Flag for signature area below the label
     label_stripped = label_text.strip()
 
     # 1. Check for "Below" Scenario
     # Condition: Label ends with a keyword AND (it's short OR no close token to the right)
     # 蠻多格子類型的最後一個字會是蓋章，簽名，簽章等
+    # Check if label ends with any signature-related keyword
     label_ends_with_keyword = any(label_stripped.endswith(kw) for kw in BELOW_LABEL_KEYWORDS)
     if label_ends_with_keyword:
-        # Check if there's NOT a close token immediately to the right
-        # 檢查最短距離旁邊有沒有字, 有字多數is not格子，一般文字
-        # Use a shorter distance check for this specific purpose
+        # Check if there's NO token immediately to the right
+        # If no token nearby, likely a signature box below rather than inline
+        # 檢查旁邊是否有文字，沒有文字則可能是下方簽名區
+        
+        # Use a shorter distance for this specific check
         short_check_dist = max(50, int(line_height * 1.5))
         nearest_right_short_dist_check = find_nearest_token_on_line(
             label_bbox, page_tokens, direction='right',
             max_horizontal_dist=short_check_dist,
             y_tolerance_factor=0.6, 
-            ignore_chars=":： ",
-            debug_mode=enable_debug_prints
-        )
-        # If there is no word nearby then assume signature area is below
+            ignore_chars=":： "        )
+        
+        # If no nearby token found, assume signature area is below the label
         if nearest_right_short_dist_check is None:
             is_below_case = True
             scene = "below_area"
@@ -433,38 +594,41 @@ def infer_signature_area_bbox(
              st.info(f"  (Keyword suffix matched, but found close right token '{nr_token['text']}' at {nr_token['bbox']}, not treating as 'below')")
             #  logging.info(f"  (Keyword suffix matched, but found close right token '{nr_token['text']}' at {nr_token['bbox']}, not treating as 'below')")
 
-    # --- Inference Logic based on Scene ---
-    # If area is detected as below area
+    # --- Inference Logic based on Scene Type ---
+    # Handle case where signature area is below the label
     if is_below_case:
-        # --- Vertical Position ---
-        sig_ymin = ly_max + vertical_margin_below
-        # Estimate height based on label height (Option A)
+        # --- Calculate Vertical Position (Y coordinates) ---
+        sig_ymin = ly_max + vertical_margin_below  # Start signature area below label with margin
+        # Estimate height based on label height multiplied by the factor
         estimated_height = int(line_height * signature_area_height_factor_below)
         # Ensure minimum sensible height for the signature area
-        estimated_height = max(estimated_height, _MIN_INFERRED_HEIGHT * 1.5) # Slightly larger min for below?
+        # 確保簽名區域有足夠的高度
+        estimated_height = max(estimated_height, _MIN_INFERRED_HEIGHT * 1.5) # Slightly larger min for below case
         sig_ymax = sig_ymin + estimated_height
         if enable_debug_prints: st.info(f"  '{scene}' Vertical: y_min={sig_ymin}, y_max={sig_ymax} (Est. H: {estimated_height})")
-        # --- Horizontal Position ---
-        sig_xmin = lx_min
-        sig_xmax = lx_max
-        # Ensure minimum width based on label height or absolute min
+        # --- Calculate Horizontal Position (X coordinates) ---
+        sig_xmin = lx_min  # Initially align with label's left edge
+        sig_xmax = lx_max  # Initially align with label's right edge
+        # Ensure minimum width based on either absolute minimum or relative to label height
+        # 確保簽名區域有足夠的寬度，根據標籤高度或絕對最小值
         min_req_width = max(min_sig_width, int(line_height * min_width_factor_below))
         current_width = sig_xmax - sig_xmin
 
-        # If the width is too narrow, adjust the width
+        # If current width is too narrow, expand it to meet minimum requirements
         if current_width < min_req_width:
             needed_expansion = min_req_width - current_width
-            # Expand somewhat centered, respecting page boundaries
-            expand_left = needed_expansion // 2
-            # Calculate potential new xmin and check boundary
+            # Expand from center outward, respecting page boundaries
+            # 向兩邊擴展，但要考慮頁面邊界
+            expand_left = needed_expansion // 2  # Try to expand half to the left
+            # Calculate new left edge and ensure it's within page boundary
             potential_xmin = sig_xmin - expand_left
-            actual_xmin = max(0, potential_xmin)
-            actual_left_expansion = sig_xmin - actual_xmin # How much it actually expanded left
+            actual_xmin = max(0, potential_xmin)  # Don't go beyond left page edge
+            actual_left_expansion = sig_xmin - actual_xmin # How much we actually expanded left
 
-            # Calculate right expansion needed based on actual left expansion
-            expand_right = needed_expansion - actual_left_expansion
+            # Calculate right expansion needed based on how much left expansion was actually possible
+            expand_right = needed_expansion - actual_left_expansion  # Remainder goes to the right
             potential_xmax = sig_xmax + expand_right
-            actual_xmax = min(page_width, potential_xmax)
+            actual_xmax = min(page_width, potential_xmax)  # Don't go beyond right page edge
 
             sig_xmin = actual_xmin
             sig_xmax = actual_xmax
@@ -472,7 +636,7 @@ def infer_signature_area_bbox(
             # Re-check width after boundary adjustments
             final_width = sig_xmax - sig_xmin
             if final_width < min_sig_width * 0.9: # Allow slight tolerance
-                 if enable_debug_prints: st.warning(f":warning: Warning: '{scene}' Expanded Width ({final_width}) still narrow than  ~{min_sig_width}。")
+                 if enable_debug_prints: st.info(f":warning: Warning: '{scene}' Expanded Width ({final_width}) still narrow than  ~{min_sig_width}。")
                 #  logging.warning(f"Warning: '{scene}' Expanded Width ({final_width}) still narrow than  ~{min_sig_width}。")
             scene += "_expand_width"
             if enable_debug_prints: st.info(f"  '{scene}' Width expanded from {current_width} to -> {final_width} (Target: {min_req_width}) => xmin={sig_xmin}, xmax={sig_xmax}")
@@ -481,29 +645,35 @@ def infer_signature_area_bbox(
              if enable_debug_prints: st.info(f"  '{scene}' Horizontal: x_min={sig_xmin}, x_max={sig_xmax} (Width {current_width} >= {min_req_width})")
             #  logging.info(f"  '{scene}' Horizontal: x_min={sig_xmin}, x_max={sig_xmax} (Width {current_width} >= {min_req_width})")
     
+    # Handle case where the label contains both a colon and parentheses
+    # Common pattern: "Label: (signature)"
     elif ((':' in label_text or '：' in label_text) and '(' in label_text and ')' in label_text):
         scene = "right_colon_with_paren"
         if enable_debug_prints: st.info(f"scenario: {scene}")
 
-        # --- Get label dimensions ---
-        label_width = lx_max - lx_min
-        label_height = ly_max - ly_min
+        # --- Calculate label dimensions ---
+        label_width = lx_max - lx_min  # Width of the label
+        label_height = ly_max - ly_min  # Height of the label
         
-        # --- Calculate signature box position (centered in the label) ---
-        # Center point of the label
+        # --- Calculate signature box position (centered on the label) ---
+        # Find the center point coordinates of the label
+        # 計算標籤的中心點
         center_x = (lx_min + lx_max) / 2
         center_y = (ly_min + ly_max) / 2
         
-        # Calculate signature width (percentage of label width, with minimum)
+        # Calculate signature width as percentage of label width, with minimum threshold
+        # 計算簽名區域寬度，使用標籤寬度的百分比，但不小於最小寬度
         sig_width = max(label_width * paren_sig_width_percent, paren_sig_min_width)
         
-        # Calculate signature height (based on label height)
+        # Calculate signature height based on label height, ensuring minimum threshold
+        # 計算簽名區域高度，不小於最小高度
         sig_height = max(label_height * signature_area_height_factor, _MIN_INFERRED_HEIGHT)
         
-        # Calculate signature box coordinates (centered on label center)
-        sig_xmin = int(center_x - sig_width / 2)
-        sig_xmax = int(center_x + sig_width / 2)
-        sig_ymin = int(center_y - sig_height / 2)
+        # Calculate signature box coordinates (centered on label's center point)
+        # 計算簽名區域的座標，以標籤中心點為基準
+        sig_xmin = int(center_x - sig_width / 2)  # Left edge
+        sig_xmax = int(center_x + sig_width / 2)  # Right edge
+        sig_ymin = int(center_y - sig_height / 2)  # Top edge
         sig_ymax = int(center_y + sig_height / 2)
         
         if enable_debug_prints:
@@ -517,7 +687,8 @@ def infer_signature_area_bbox(
     # Scenario of right colon 簽名:______, 簽章:     
     elif label_stripped.endswith(':') or label_stripped.endswith('：'):
         scene = "right_colon"
-        if enable_debug_prints: st.info(f"scenario: {scene}")
+        if enable_debug_prints: 
+          st.info(f"scenario: {scene}")
         
         # avoid overlap with the label 
         sig_xmin = lx_max + horizontal_margin
@@ -533,8 +704,7 @@ def infer_signature_area_bbox(
         nearest_right_token = find_nearest_token_on_line(
             label_bbox, page_tokens, direction='right',
             max_horizontal_dist=nearest_token_max_dist,
-            y_tolerance_factor=nearest_token_y_factor,
-            debug_mode=enable_debug_prints
+            y_tolerance_factor=nearest_token_y_factor
         )
         if nearest_right_token:
             nr_bbox = nearest_right_token["bbox"]
@@ -553,7 +723,7 @@ def infer_signature_area_bbox(
     #.    _______(簽名)
     elif label_stripped.startswith('(') and label_stripped.endswith(')'):
         scene = "left_paren"
-        if enable_debug_prints: st.write(f"Scenario: {scene}")
+        if enable_debug_prints: st.info(f"Scenario: {scene}")
         # --- Horizontal Position ---
         sig_xmax = lx_min - horizontal_margin
         # --- Vertical position: Center align with label ---
@@ -566,9 +736,8 @@ def infer_signature_area_bbox(
         nearest_left_token = find_nearest_token_on_line(
             label_bbox, page_tokens, direction='left',
             max_horizontal_dist=nearest_token_max_dist,
-            y_tolerance_factor=nearest_token_y_factor,
-            debug_mode=enable_debug_prints
-        )
+            y_tolerance_factor=nearest_token_y_factor        
+            )
         if nearest_left_token:
              nl_bbox = nearest_left_token["bbox"]
              # Infer xmin based on nearest token, ensure minimum width gap
@@ -597,30 +766,31 @@ def infer_signature_area_bbox(
         nearest_right_token = find_nearest_token_on_line(
             label_bbox, page_tokens, direction='right',
             max_horizontal_dist=nearest_token_max_dist,
-            y_tolerance_factor=nearest_token_y_factor,
-            debug_mode=enable_debug_prints
+            y_tolerance_factor=nearest_token_y_factor
         )
         if nearest_right_token:
              nr_bbox = nearest_right_token["bbox"]
              sig_xmax = max(sig_xmin + min_sig_width // 2, nr_bbox[0] - horizontal_margin)
-             if enable_debug_prints: st.write(f"  '{scene}' Found right token: '{nearest_right_token['text']}' => sig_xmax={sig_xmax}")
+             if enable_debug_prints: st.info(f"  '{scene}' Found right token: '{nearest_right_token['text']}' => sig_xmax={sig_xmax}")
             #  logging.info(f"  '{scene}' Found right token: '{nearest_right_token['text']}' => sig_xmax={sig_xmax}")
         else:
              dynamic_width = calculate_dynamic_default_width(sig_xmin, 'right')
              sig_xmax = min(sig_xmin + dynamic_width, page_width - horizontal_margin)
-             if enable_debug_prints: st.write(f"  '{scene}' No right token found, using dynamic width {dynamic_width} => sig_xmax={sig_xmax}")
+             if enable_debug_prints: st.info(f"  '{scene}' No right token found, using dynamic width {dynamic_width} => sig_xmax={sig_xmax}")
             #  logging.info(f"  '{scene}' No right token found, using dynamic width {dynamic_width} => sig_xmax={sig_xmax}")
 
     # --- Final Checks 
     if sig_xmin == -1 or sig_xmax == -1 or sig_ymin == -1 or sig_ymax == -1:
-        if enable_debug_prints: st.error(f"Error: Cannot calculate all the bounding box (xmin={sig_xmin}, ymin={sig_ymin}, xmax={sig_xmax}, ymax={sig_ymax})。")
+        if enable_debug_prints: 
+          st.error(f"Error: Cannot calculate all the bounding box (xmin={sig_xmin}, ymin={sig_ymin}, xmax={sig_xmax}, ymax={sig_ymax})。")
         # logging.error(f"Error: Cannot calculate all the bounding box (xmin={sig_xmin}, ymin={sig_ymin}, xmax={sig_xmax}, ymax={sig_ymax})。")
         return None
 
     # Final width check - ensure min_sig_width is met after all logic
     calculated_width = sig_xmax - sig_xmin
     if calculated_width < min_sig_width:
-         if enable_debug_prints: st.warning(f"Warining: Final width ({calculated_width:.0f}) < {min_sig_width}。Fixing....。")
+         if enable_debug_prints: 
+          st.warning(f"Warining: Final width ({calculated_width:.0f}) < {min_sig_width}。Fixing....。")
         #  logging.warning(f"Warining: Final width ({calculated_width:.0f}) < {min_sig_width}。Fixing....。")
 
          if scene.startswith("left"): # Expand left if it was a left-based rule
@@ -631,11 +801,11 @@ def infer_signature_area_bbox(
              sig_xmax = min(page_width, sig_xmin + min_sig_width)
          # If still too narrow (page too small), it is what it is
          if sig_xmax - sig_xmin < min_sig_width * 0.8:
-              if enable_debug_prints: st.write(f"  Width fixed ({sig_xmax - sig_xmin}) not enough")
+              if enable_debug_prints: st.info(f"  Width fixed ({sig_xmax - sig_xmin}) not enough")
               # logging.info(f"  Width fixed ({sig_xmax - sig_xmin}) not enough")
          else:
               scene += "_final_min_width_fix"
-              if enable_debug_prints: st.write(f"  Width fixed: xmin={sig_xmin}, xmax={sig_xmax}")
+              if enable_debug_prints: st.info(f"  Width fixed: xmin={sig_xmin}, xmax={sig_xmax}")
               # logging.info(f"  Width fixed: xmin={sig_xmin}, xmax={sig_xmax}")
 
     # Clip final coordinates to page boundaries
@@ -667,16 +837,22 @@ def infer_signature_area_bbox(
     inferred_bbox = (int(sig_xmin), int(sig_ymin), int(sig_xmax), int(sig_ymax))
     # Check and Validate 
     if inferred_bbox[2] <= inferred_bbox[0] or inferred_bbox[3] <= inferred_bbox[1]:
-         if enable_debug_prints: st.error(f"Error: Invalid Bounding box:  {inferred_bbox}")
+         if enable_debug_prints: 
+          st.error(f"Error: Invalid Bounding box:  {inferred_bbox}")
         #  logging.error(f"Error: Invalid Bounding box:  {inferred_bbox}")
          return None
 
-    if enable_debug_prints: st.write(f"Final BBox ('{scene}'): {inferred_bbox}")
+    if enable_debug_prints: 
+      st.info(f"Final BBox ('{scene}'): {inferred_bbox}")
     # logging.info(f"Final BBox ('{scene}'): {inferred_bbox}")
     return inferred_bbox, scene
 
 def process_document_ai(file_path: str) -> Optional[documentai.Document]:
     global client, processor_name # Use global client and processor name
+    client = documentai.DocumentProcessorServiceClient()
+    if not file_path:
+        st.error("Error: No file provided")
+        return None
 
     if not os.path.exists(file_path):
         st.error(f"Error: File not exist {file_path}")
@@ -694,8 +870,8 @@ def process_document_ai(file_path: str) -> Optional[documentai.Document]:
              elif ext == ".tiff" or ext == ".tif": mime_type = "image/tiff"
              else: raise ValueError(f"File type not sure: {file_path}")
 
-        st.success(f"""Handling: {file_path}
-        \nMIME type: {mime_type}""", icon="✅")
+        st.info(f"""Handling: {file_path}
+        \nMIME type: {mime_type}""")
 
         # Check supported MIME types
         supported_types = ["application/pdf", "image/jpeg", "image/png", "image/jpg", "image/tiff"]
@@ -717,6 +893,7 @@ def process_document_ai(file_path: str) -> Optional[documentai.Document]:
             # skip_human_review=True # Set to True if you don't use Human-in-the-Loop
         )
 
+        
         progress_text = "Kdan AI processing in progress. Please wait..."
         my_bar = st.progress(0, text=progress_text)
         
@@ -739,6 +916,7 @@ def process_document_ai(file_path: str) -> Optional[documentai.Document]:
     except Exception as e:
         st.error(f"Handling {file_path} Error: {e}")
         return None
+        
 
 def send_feedback_to_bigquery(metadata: Dict):
     """Send feedback and metadata to BigQuery."""
@@ -781,15 +959,17 @@ def send_feedback_to_bigquery(metadata: Dict):
         raise Exception(f"Errors inserting rows to BigQuery: {errors}")
     return True
 
-def extract_and_infer_signature_areas(document: documentai.Document) -> Tuple[List[Dict], Dict]:
+def extract_and_infer_signature_areas(document: documentai.Document) -> Tuple[List[Dict], Dict, Dict]:
     results = []
-    doc_ai_dimensions = {} # 存儲 DocAI 的頁面尺寸
+    doc_ai_dimensions = {}
+    page_images = {}  # 儲存所有頁面的圖像
+
     if not document.pages:
-        st.warning("Warning: Document AI has no page details。")
-        return results, doc_ai_dimensions
+        st.warning("Warning: Document AI has no page details.")
+        return results, doc_ai_dimensions, page_images
 
     page_tokens_map = {}
-    # Pre-process all pages to get tokens and dimensions
+    # Pre-process all pages to get tokens, dimensions, and images
     for i, page in enumerate(document.pages):
         if not page.dimension or not page.dimension.width or not page.dimension.height or page.dimension.width <= 0 or page.dimension.height <= 0:
             st.warning(f"Warning: Page {i} invalid. Skip")
@@ -797,94 +977,122 @@ def extract_and_infer_signature_areas(document: documentai.Document) -> Tuple[Li
 
         page_width_docai = int(page.dimension.width)
         page_height_docai = int(page.dimension.height)
-
-        # Store DocAI dimensions for later use (e.g., scaling in visualization)
         doc_ai_dimensions[i] = {'width': page_width_docai, 'height': page_height_docai}
 
         # Extract tokens for the current page
+        page_tokens = get_page_tokens(page, page_width_docai, page_height_docai)
         page_tokens_map[i] = {
-            "tokens": get_page_tokens(page, page_width_docai, page_height_docai),
+            "tokens": page_tokens,
             "width": page_width_docai,
             "height": page_height_docai
         }
 
+        # Decode page image if available
+        if hasattr(page, 'image') and page.image.content:
+            try:
+                # 將二進制圖像數據轉換為 OpenCV 格式
+                nparr = np.frombuffer(page.image.content, np.uint8)
+                img_cv = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                if img_cv is not None:
+                    page_images[i] = img_cv
+                else:
+                    st.warning(f"Warning: Failed to decode image for page {i}")
+            except Exception as e:
+                st.error(f"Error decoding image for page {i}: {e}")
+
     if not document.entities:
         st.warning("Warning: Document AI has not label entities.")
-        return results, doc_ai_dimensions
 
     target_entity_type = "signature_field"
     if enable_debug_prints:
         st.info(f"From {len(document.entities)} Entities searching '{target_entity_type}'...")
 
     processed_entity_count = 0
-    min_sig_width_default = 50  # Provide a default value
 
     for entity in document.entities:
         if entity.type == target_entity_type:
-            # Basic entity validation
             if not entity.page_anchor or not entity.page_anchor.page_refs:
-                 st.warning(f"Warning: Entity '{entity.mention_text}' has no page_anchor or page_refs")
-                 continue
+                st.warning(f"Warning: Entity '{entity.mention_text}' has no page_anchor or page_refs")
+                continue
 
             page_ref = entity.page_anchor.page_refs[0]
-            page_num = page_ref.page # page_num is 0-based index
+            page_num = page_ref.page
 
-            # Check if page data was successfully processed earlier
             if page_num not in page_tokens_map:
-              st.warning(f"Warning: The page {page_num} corresponding to entity '{entity.mention_text}' has not been processed (possibly due to invalid dimensions).")
-              continue
-
+                st.warning(f"Warning: The page {page_num} corresponding to entity '{entity.mention_text}' has not been processed.")
+                continue
 
             page_info = page_tokens_map[page_num]
             page_width_docai = page_info["width"]
             page_height_docai = page_info["height"]
             page_tokens = page_info["tokens"]
 
-            # Check for bounding poly on the page reference(Actual Coordinate)
             if not page_ref.bounding_poly or not page_ref.bounding_poly.normalized_vertices:
                 st.warning(f"Warning: The page_ref for entity '{entity.mention_text}' (Page {page_num}) is missing bounding_poly.")
                 continue
 
-            # Store normalized vertices for visualization scaling
             label_bbox_normalized = page_ref.bounding_poly.normalized_vertices
+            label_bbox_pixel_docai = get_pixel_bbox(label_bbox_normalized, page_width_docai, page_height_docai)
+
+            # 動態計算參數
+            min_sig_width_default = calculate_dynamic_min_sig_width(page_tokens, page_width_docai)
+            nearest_token_y_factor = calculate_dynamic_y_tolerance(page_tokens)
+            nearest_token_max_dist = calculate_dynamic_max_horizontal_dist(page_tokens, page_width_docai)
+            signature_area_height_factor = calculate_dynamic_height_factor(label_bbox_pixel_docai, page_tokens)
 
             inference_result = infer_signature_area_bbox(
                 label_entity=entity,
                 page_tokens=page_tokens,
                 page_width=page_width_docai,
                 page_height=page_height_docai,
-                min_sig_width=min_sig_width_default,  
-                enable_debug_prints=enable_debug_prints 
+                min_sig_width=min_sig_width_default,
+                signature_area_height_factor=signature_area_height_factor,
+                nearest_token_max_dist=nearest_token_max_dist,
+                nearest_token_y_factor=nearest_token_y_factor
             )
 
-            inferred_area_bbox_pixel_docai = None # BBox relative to DocAI dimensions
-            inferred_rule = "failed"  # Initial
+            inferred_area_bbox_pixel_docai = None
+            inferred_rule = "failed"
+            inferred_area_bbox_normalized = None
+
             if inference_result:
-                # Unpack result if inference was successful
                 inferred_area_bbox_pixel_docai, inferred_rule = inference_result
                 processed_entity_count += 1
 
+                sig_xmin, sig_ymin, sig_xmax, sig_ymax = inferred_area_bbox_pixel_docai
+                norm_xmin = sig_xmin / page_width_docai
+                norm_ymin = sig_ymin / page_height_docai
+                norm_xmax = sig_xmax / page_width_docai
+                norm_ymax = sig_ymax / page_height_docai
 
-            # Calculate label bbox again just for storing in results, if needed
-            # Can be recalculated later from normalized vertices during visualization
+                inferred_area_bbox_normalized = [
+                    documentai.NormalizedVertex(x=norm_xmin, y=norm_ymin),
+                    documentai.NormalizedVertex(x=norm_xmax, y=norm_ymin),
+                    documentai.NormalizedVertex(x=norm_xmax, y=norm_ymax),
+                    documentai.NormalizedVertex(x=norm_xmin, y=norm_ymax)
+                ]
+
             label_bbox_pixel_docai_for_storage = get_pixel_bbox(label_bbox_normalized, page_width_docai, page_height_docai)
 
             # Append result
-            results.append({
+            result_dict = {
                 "entity_type": target_entity_type,
                 "label_text": entity.mention_text,
-                "label_bbox_normalized": label_bbox_normalized, 
-                "label_bbox_pixel_docai": label_bbox_pixel_docai_for_storage,  # pixel邊界框
-                "inferred_area_bbox_pixel_docai": inferred_area_bbox_pixel_docai, 
+                "label_bbox_normalized": label_bbox_normalized,
+                "label_bbox_pixel_docai": label_bbox_pixel_docai_for_storage,
+                "inferred_area_bbox_pixel_docai": inferred_area_bbox_pixel_docai,
+                "inferred_area_bbox_normalized": inferred_area_bbox_normalized,
                 "inferred_rule": inferred_rule,
                 "confidence": entity.confidence,
-                "page": page_num, 
-                "min_sig_width": min_sig_width_default   # Minium width of signature area
-            })
+                "page": page_num,
+                "min_sig_width": min_sig_width_default
+            }
+            results.append(result_dict)
+
     if enable_debug_prints:
         st.info(f"Found and attempting to process {len([r for r in results if r['entity_type'] == target_entity_type])} '{target_entity_type}' entities.")
         st.info(f"Successfully inferred {processed_entity_count} signature regions.")
-    return results, doc_ai_dimensions
+    return results, doc_ai_dimensions, page_images
 
 # Initialize session state variables if they don't exist
 if 'uploaded_file' not in st.session_state:
@@ -907,7 +1115,7 @@ if 'feedback_comment' not in st.session_state:
     st.session_state.feedback_comment = ""
 
 # Callback function for handling feedback
-def handle_document_feedback(feedback, comment, doc_id, processed_results):
+def handle_document_feedback(feedback, comment, doc_id, processed_results,page_images):
     """Function to handle document-level feedback submission"""
     feedback_key = f"feedback_doc_{doc_id}"
     
@@ -920,7 +1128,8 @@ def handle_document_feedback(feedback, comment, doc_id, processed_results):
             "feedback": feedback,
             "comment": comment,
             "timestamp": current_time,
-            "results": str(processed_results)  
+            "results": str(processed_results)  ,
+            "page_images": str(page_images)
         }
         
         # Store in session state
@@ -999,288 +1208,91 @@ if st.session_state.uploaded_file:
                     st.error(f"無法上傳文件至 GCS: {e}")
 
             # --- Adjusted Visualization for Streamlit ---
-            def visualize_results(file_path: str, processed_results: List[Dict], doc_ai_dimensions: Dict,
-                      _HORIZONTAL_MARGIN = 5,
-                      _MIN_INFERRED_HEIGHT = 15,
-                      vertical_margin_below=10,
-                      min_width_factor_below=3.0):
+            def visualize_results(processed_results: List[Dict], doc_ai_dimensions: Dict, page_images: Dict):
                 """Visualize processed_results, recalculating coordinates based on the actual image dimensions for drawing."""
-                if not os.path.exists(file_path):
-                    st.error(f":x: Error: Visualization file does not exist {file_path}")
-                    # logging.error(f"Error: Visualization file does not exist {file_path}")
+                if not doc_ai_dimensions:
+                    st.error("No pages to visualize (doc_ai_dimensions is empty).")
                     return
 
-                # Determine MIME type for loading
-                mime_type, _ = mimetypes.guess_type(file_path)
-                if not mime_type:
-                    _, ext = os.path.splitext(file_path)
-                    ext = ext.lower()
-                    if ext == ".pdf": mime_type = "application/pdf"
-                    elif ext in [".jpg", ".jpeg"]: mime_type = "image/jpeg"
-                    elif ext == ".png": mime_type = "image/png"
-                    elif ext == ".tiff" or ext == ".tif": mime_type = "image/tiff"
-                    else:
-                        st.error(f":x: Error: Unable to determine MIME type for visualization file: {file_path}")
-                        # logging.error(f"Error: Unable to determine MIME type for visualization file: {file_path}")
-                    return
-                if enable_debug_prints:
-                    st.info(f"\nStarting visualization of file: {file_path} (type: {mime_type})")
-
-                images_cv = []
-                try: # Load file into OpenCV image(s)
-                    if mime_type == "application/pdf":
-                        # Convert PDF to list of PIL images, then to OpenCV format
-                        # Adjust dpi and size as needed for desired resolution vs. memory usage
-                        images_pil = convert_from_path(file_path, dpi=200, timeout=180, size=(None, 4000))
-                        images_cv = [cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR) for img in images_pil] #將 PIL Image轉為 NumPy array並從 RGB 轉為 BGR
-                        st.success(f"Loaded {len(images_cv)} pages from PDF.")
-                    elif mime_type in ["image/jpeg", "image/png", "image/jpg", "image/tiff"]:
-                        img_cv = cv2.imread(file_path)
-                        if img_cv is None: raise ValueError(f"Unable to read image file with OpenCV: {file_path}")
-                        images_cv = [img_cv]
-                        st.success(f"Image file loaded.")
-                    else:
-                        raise ValueError(f"Unsupported visualization file type: {mime_type}")
-                except Exception as e:
-                    st.error(f":x: Failed to load image file: {e}")
-                    return
-                if not images_cv:
-                    st.error(f":x: Error: Failed to load any image pages from {file_path} for visualization.")
-                    return
-
-                for page_num, img_cv in enumerate(images_cv):
-                    # Basic check on loaded image page
-                    if img_cv is None or img_cv.size == 0:
-                        st.warning(f"警告: 頁面 {page_num} 的圖像數據無效，跳過。")
+                for page_num in sorted(doc_ai_dimensions.keys()):
+                    page_results = [r for r in processed_results if r.get("page") == page_num]
+                    if page_num not in page_images or page_images[page_num] is None:
+                        st.warning(f"Warning: Page {page_num} not found in page_images.")
                         continue
-                        
-                    # Set up feedback collection for this page
-                    feedback_key = f"feedback_page_{page_num}"
                     
-                    # Get results from session state if available
-                    processed_results = st.session_state.results if st.session_state.results is not None else []
-
-                    # Ensure image is in BGR format for cv2 drawing functions
-                    try:
-                        if len(img_cv.shape) < 3 or img_cv.shape[2] != 3:
-                            if len(img_cv.shape) == 2: # Grayscale --> BGRA
-                                img_cv = cv2.cvtColor(img_cv, cv2.COLOR_GRAY2BGR)
-                            elif img_cv.shape[2] == 4: # RGBA --> BGRA
-                                img_cv = cv2.cvtColor(img_cv, cv2.COLOR_RGBA2BGR) # Assuming RGBA from PIL
-                            else: # Other formats: Taking first 3 channels
-                                img_cv = img_cv[:, :, :3]
-                    # Final check after conversion attempts
-                        if len(img_cv.shape) < 3 or img_cv.shape[2] != 3:
-                            raise ValueError("Unable to convert image to 3-channel BGR format")
-                    except Exception as convert_err:
-                        st.error(f"Error: Unable to convert page {page_num+1} to BGR format: {convert_err}, skipping.")
-                        continue
-
-                    vis_height, vis_width, _ = img_cv.shape
-                    st.write(f"--- Visualizing page {page_num+1} ---")
-                    if enable_debug_prints:
-                        st.info(f"  Actual image dimensions (after rendering/loading): {vis_width}x{vis_height}")
-                    doc_page_width = None
-                    doc_page_height = None
-                    scale_x = 1.0
-                    scale_y = 1.0
-                    if page_num in doc_ai_dimensions:
-                        doc_page_info = doc_ai_dimensions[page_num]
-                        doc_page_width = doc_page_info.get('width')
-                        doc_page_height = doc_page_info.get('height')
-                        if doc_page_width and doc_page_height and doc_page_width > 0 and doc_page_height > 0: # If valid size
-                            if enable_debug_prints:
-                                st.info(f"  DocAI reported dimensions: {doc_page_width}x{doc_page_height}")
-                            # logging.info(f"  DocAI reported dimensions: {doc_page_width}x{doc_page_height}")
-                            # Check for significant size mismatch
-                            if abs(doc_page_width - vis_width) > 5 or abs(doc_page_height - vis_height) > 5:
-                                scale_x = vis_width / doc_page_width
-                                scale_y = vis_height / doc_page_height
-                                if enable_debug_prints:
-                                    st.info(f"  !!!! Size mismatch !!!! Calculated scaling factors: X={scale_x:.3f}, Y={scale_y:.3f}")
-                            else:
-                                st.warning(f"  Dimensions match, scaling factor is 1.0")
+                    img_cv = page_images[page_num]
+                    if len(img_cv.shape) < 3 or img_cv.shape[2] != 3:
+                        if len(img_cv.shape) == 2:  # Grayscale -> BGR
+                            img_cv = cv2.cvtColor(img_cv, cv2.COLOR_GRAY2BGR)
+                        elif img_cv.shape[2] == 4:  # RGBA -> BGR
+                            img_cv = cv2.cvtColor(img_cv, cv2.COLOR_RGBA2BGR)
                         else:
-                            st.warning(f"Warning: DocAI dimension information for page {page_num + 1} is invalid. Assuming scaling factor of 1.0.")
-                            doc_page_width, doc_page_height = vis_width, vis_height 
-                    else:
-                        st.warning(f"Warning: No DocAI dimension information found for page {page_num + 1}. Assuming scaling factor of 1.0.")
-                        doc_page_width, doc_page_height = vis_width, vis_height
-                    page_results = [res for res in processed_results if res.get("page") == page_num]
-                    if not page_results:
-                        st.write(f"Page {page_num + 1} has no detection results to draw.")
-                        # continue # Skip to next page if no results for this one
+                            st.error(f"Error: Unable to convert image for page {page_num} to BGR format, skipping.")
+                            continue
+                    
+                    vis_height, vis_width, _ = img_cv.shape
+                    st.info(f"--- Visualizing page {page_num + 1} ---")
+                    if enable_debug_prints:
+                        st.info(f"  Image dimensions: {vis_width}x{vis_height}")
 
-                    # Create a copy of the image to draw on
                     img_to_show = img_cv.copy()
-                    for result_idx, result in enumerate(page_results):
-                        if enable_debug_prints:
-                            st.info(f"  Processing result {result_idx+1}/{len(page_results)}: Label='{result.get('label_text', 'N/A')}'")
-                        entity_type = result.get("entity_type", "unknown_label")
-                        inferred_rule = result.get("inferred_rule", "N/A")
-                        label_normalized_vertices = result.get("label_bbox_normalized")
-
-                        # --- Calculate and Draw Label BBox (Red) bounding box that predict by DocumentAI---
-                        label_bbox_vis = None 
-                        if label_normalized_vertices:
-                            # Calculate pixel bbox based on VISUAL image dimensions
-                            label_bbox_vis = get_pixel_bbox(label_normalized_vertices, vis_width, vis_height)
-
-                        if label_bbox_vis and len(label_bbox_vis) == 4:
-                            lx_vis, ly_vis, lx2_vis, ly2_vis = label_bbox_vis
-                            # Ensure coordinates are valid before drawing
-                            if lx_vis < lx2_vis and ly_vis < ly2_vis:
+                    if page_results:
+                        for result_idx, result in enumerate(page_results):
+                            if enable_debug_prints:
+                                st.info(f"  Processing result {result_idx+1}/{len(page_results)}: Label='{result.get('label_text', 'N/A')}'")
+                            entity_type = result.get("entity_type", "unknown_label")
+                            inferred_rule = result.get("inferred_rule", "N/A")
+                            label_normalized_vertices = result.get("label_bbox_normalized")
+                            inferred_normalized_vertices = result.get("inferred_area_bbox_normalized")
+                            label_bbox_vis = None
+                            if label_normalized_vertices:
+                                x_coords = [v.x for v in label_normalized_vertices if v.x is not None]
+                                y_coords = [v.y for v in label_normalized_vertices if v.y is not None]
+                                if x_coords and y_coords:
+                                    lx_vis = int(min(x_coords) * vis_width)
+                                    ly_vis = int(min(y_coords) * vis_height)
+                                    lx2_vis = int(max(x_coords) * vis_width)
+                                    ly2_vis = int(max(y_coords) * vis_height)
+                                    label_bbox_vis = (lx_vis, ly_vis, lx2_vis, ly2_vis)
+                            
+                            if label_bbox_vis and lx_vis < lx2_vis and ly_vis < ly2_vis:
                                 try:
-                                    # Draw red rectangle for the label
-                                    cv2.rectangle(img_to_show, (lx_vis, ly_vis), (lx2_vis, ly2_vis), (0, 0, 255), 2) # BGR Red 255
-                                    # Add text label above the box
+                                    cv2.rectangle(img_to_show, (lx_vis, ly_vis), (lx2_vis, ly2_vis), (0, 0, 255), 2)  # 紅色
                                     text_y = ly_vis - 10 if ly_vis > 15 else ly2_vis + 20
-                                    label_text_simple = f"{entity_type}" 
+                                    label_text_simple = f"{entity_type}"
                                     cv2.putText(img_to_show, label_text_simple, (lx_vis, text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
                                 except Exception as draw_err:
                                     st.error(f"Error: Failed to draw Label '{entity_type}': {draw_err}, BBox={label_bbox_vis}")
-                            else:
-                                st.warning(f"Warning: Visualization BBox for Label '{entity_type}' is invalid ({label_bbox_vis}), cannot draw.")
-                                #  logging.warning(f"Warning: Visualization BBox for Label '{entity_type}' is invalid ({label_bbox_vis}), cannot draw.")
-                                label_bbox_vis = None 
-                        else:
-                            st.warning(f"Warning: Unable to calculate Label BBox for '{entity_type}' for drawing.")
-                            # logging.warning(f"Warning: Unable to calculate Label BBox for '{entity_type}' for drawing.")
-                            continue 
-                        label_h_vis = ly2_vis - ly_vis if label_bbox_vis else 20 # Visual height of label, default 20 avoid error
-                        # --- Calculate Inferred BBox for drawing (Green) bounding box that from post processing) ---
-                        inferred_bbox_vis = None # Initial
-                        inferred_bbox_docai = result.get("inferred_area_bbox_pixel_docai") # Get inferred box (DocAI coords)
-
-                        if inferred_bbox_docai and len(inferred_bbox_docai) == 4:
-                            ix_docai, iy_docai, ix2_docai, iy2_docai = inferred_bbox_docai
-                            inf_w_docai = ix2_docai - ix_docai
-                            inf_h_docai = iy2_docai - iy_docai
-
-                            # Check if inferred DocAI box is valid before scaling
-                            if inf_w_docai > 0 and inf_h_docai > 0:
+                            inferred_bbox_vis = None
+                            if inferred_normalized_vertices:
+                                x_coords = [v.x for v in inferred_normalized_vertices if v.x is not None]
+                                y_coords = [v.y for v in inferred_normalized_vertices if v.y is not None]
+                                if x_coords and y_coords:
+                                    ix_vis = int(min(x_coords) * vis_width)
+                                    iy_vis = int(min(y_coords) * vis_height)
+                                    ix2_vis = int(max(x_coords) * vis_width)
+                                    iy2_vis = int(max(y_coords) * vis_height)
+                                    inferred_bbox_vis = (ix_vis, iy_vis, ix2_vis, iy2_vis)
+                            if inferred_bbox_vis and ix_vis < ix2_vis and iy_vis < iy2_vis:
                                 try:
-                                    # 1. Calculate scaled width/height for visualization
-                                    new_inf_w_vis = inf_w_docai * scale_x
-                                    new_inf_h_vis = inf_h_docai * scale_y
-                                    # Enforce minimum visual height
-                                    new_inf_h_vis = max(new_inf_h_vis, _MIN_INFERRED_HEIGHT)
-
-                                    # --- 2. Calculate Visual Position based on Inference Rule ---
-                                    ix_vis, iy_vis, ix2_vis, iy2_vis = -1,-1,-1,-1 # Initialize visual coords
-
-                                    # Get visual label coords again (needed for all rules)
-                                    lx_vis, ly_vis, lx2_vis, ly2_vis = label_bbox_vis
-
-                                    if inferred_rule.startswith("below"):
-                                        # Vertical position based on VISUAL label bottom + scaled margin
-                                        scaled_margin_y = int(vertical_margin_below * scale_y)
-                                        iy_vis = ly2_vis + scaled_margin_y
-                                        iy2_vis = iy_vis + int(new_inf_h_vis)
-                                        # Horizontal position: Scale DocAI coords or align with visual label
-                                        # Scaling DocAI coords is often more reliable if expansion logic was complex
-                                        ix_vis_scaled = ix_docai * scale_x
-                                        ix2_vis_scaled = ix2_docai * scale_x
-                                        current_width_vis = ix2_vis_scaled - ix_vis_scaled
-
-                                        # Optional: Re-apply minimum width check based on visual dimensions
-                                        min_sig_width=50
-                                        min_req_width_vis = max(min_sig_width * scale_x, int(label_h_vis * min_width_factor_below))
-                                        if current_width_vis < min_req_width_vis * 0.9:
-                                            st.info(f"    '{inferred_rule}': Visual width {current_width_vis:.0f} < target {min_req_width_vis:.0f}. Expanding visually.")
-                                            # Center expansion based on visual label center
-                                            center_x_vis = (lx_vis + lx2_vis) / 2
-                                            half_width = min_req_width_vis / 2
-                                            ix_vis = center_x_vis - half_width
-                                            ix2_vis = center_x_vis + half_width
-                                        else:
-                                            ix_vis = ix_vis_scaled
-                                            ix2_vis = ix2_vis_scaled
-
-                                    elif inferred_rule.startswith("right_colon_with_paren"):
-                                        ix_vis = ix_docai * scale_x
-                                        ix2_vis = ix2_docai * scale_x
-                                        iy_vis = iy_docai * scale_y
-                                        iy2_vis = iy2_docai * scale_y
-
-                                    elif inferred_rule.startswith("right") or inferred_rule.startswith("fallback"):
-                                        # Horizontal position based on VISUAL label right + scaled margin
-                                        scaled_margin_x = int(_HORIZONTAL_MARGIN * scale_x)
-                                        ix_vis = lx2_vis + scaled_margin_x
-                                        ix2_vis = ix_vis + int(new_inf_w_vis)
-                                        # Vertical position: center align with VISUAL label's vertical center
-                                        center_y_vis = (ly_vis + ly2_vis) / 2
-                                        iy_vis = center_y_vis - int(new_inf_h_vis / 2)
-                                        iy2_vis = iy_vis + int(new_inf_h_vis)
-
-                                    elif inferred_rule.startswith("left"):
-                                        # Horizontal position based on VISUAL label left - scaled margin
-                                        scaled_margin_x = int(_HORIZONTAL_MARGIN * scale_x)
-                                        ix2_vis = lx_vis - scaled_margin_x
-                                        ix_vis = ix2_vis - int(new_inf_w_vis)
-                                        # Vertical position: center align with VISUAL label's vertical center
-                                        center_y_vis = (ly_vis + ly2_vis) / 2
-                                        iy_vis = center_y_vis - int(new_inf_h_vis / 2)
-                                        iy2_vis = iy_vis + int(new_inf_h_vis)
-
-                                    else: # Unknown or failed rule - attempt fallback drawing to the right
-                                        st.info(f"    Processing unknown or failed rule '{inferred_rule}', attempting to draw on the right.")
-                                        #  logging.info(f"    Processing unknown or failed rule '{inferred_rule}', attempting to draw on the right.")
-                                        scaled_margin_x = int(_HORIZONTAL_MARGIN * scale_x)
-                                        ix_vis = lx2_vis + scaled_margin_x
-                                        ix2_vis = ix_vis + int(new_inf_w_vis) # Use scaled width
-                                        center_y_vis = (ly_vis + ly2_vis) / 2
-                                        iy_vis = center_y_vis - int(new_inf_h_vis / 2) # Use scaled height
-                                        iy2_vis = iy_vis + int(new_inf_h_vis)
-
-                                    # 3. Clip coordinates to visual page boundaries
-                                    ix_vis = int(max(0, ix_vis))
-                                    iy_vis = int(max(0, iy_vis))
-                                    ix2_vis = int(min(vis_width, ix2_vis))
-                                    iy2_vis = int(min(vis_height, iy2_vis))
-
-                                    # 4. Final check for visual validity
-                                    if ix2_vis > ix_vis and iy2_vis > iy_vis:
-                                        inferred_bbox_vis = (ix_vis, iy_vis, ix2_vis, iy2_vis)
-                                    else:
-                                        st.info(f"Warning: Calculated Inferred BBox for drawing is invalid (Rule: {inferred_rule}). Coords: {(ix_vis, iy_vis, ix2_vis, iy2_vis)}")
-                                        #  logging.warning(f"Warning: Calculated Inferred BBox for drawing is invalid (Rule: {inferred_rule}). Coords: {(ix_vis, iy_vis, ix2_vis, iy2_vis)}")
-
-                                except Exception as calc_err:
-                                    st.info(f"Error: Failed to calculate Inferred BBox for drawing (Rule: {inferred_rule}): {calc_err}")
-                                    inferred_bbox_vis = None
-                            else:
-                                st.info(f"Warning: Inferred DocAI BBox is invalid ({inferred_bbox_docai}), unable to scale for visualization.")
-                                #  logging.warning(f"Warning: Inferred DocAI BBox is invalid ({inferred_bbox_docai}), unable to scale for visualization.")
-
-                        # --- Draw Inferred BBox (Green) Bounding box that from post processing ---
-                        if inferred_bbox_vis:
-                            ix, iy, ix2, iy2 = inferred_bbox_vis
-                            try:
-                                # Draw green rectangle for the inferred area
-                                cv2.rectangle(img_to_show, (ix, iy), (ix2, iy2), (0, 255, 0), 2) # BGR Green
-                                # Add text label for the inferred area
-                                text_y = iy - 10 if iy > 15 else iy2 + 20
-                                rule_str = str(inferred_rule).replace("_", " ") # Clean up rule string
-                                inferred_text_simple = f"SignArea ({rule_str})"
-                                # Adjust text position if it overlaps too much with label text
-                                if abs(iy - ly_vis) < 30 and ix < lx2_vis + 50: text_y = iy2 + 20
-                                    # Make font slightly smaller
-                                cv2.putText(img_to_show, inferred_text_simple, (ix, text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 128, 0), 2) # Darker Green
-                                # print(f"    Drawing Inferred (green) @ ({ix},{iy})-({ix2},{iy2}) (Rule: {rule_str})")
-                            except Exception as draw_err:
-                                st.info(f"Error: Failed to draw Inferred box/text: {draw_err}, BBox={inferred_bbox_vis}")
-
-                        elif label_bbox_vis: # Only draw 'failed' if label was drawn but inference failed/invalid
-                            try:
-                                # Draw text indicating failure near the label
-                                lx2_vis, ly_vis, _, _ = label_bbox_vis # Get label position again
-                                cv2.putText(img_to_show, 'Area Infer Failed', (lx2_vis + 5, ly_vis + 15), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 1) # Red text
-                                st.info(f"    Marked inference failure (Rule: {inferred_rule})")
-                            except Exception as draw_err:
-                                st.info(f"Error: Failed to draw 'Area Infer Failed' text: {draw_err}")
-
-                    # --- Display image page using Streamlit ---
+                                    cv2.rectangle(img_to_show, (ix_vis, iy_vis), (ix2_vis, iy2_vis), (0, 255, 0), 2)  # 綠色
+                                    text_y = iy_vis - 10 if iy_vis > 15 else iy2_vis + 20
+                                    rule_str = str(inferred_rule).replace("_", " ")
+                                    inferred_text_simple = f"{rule_str}"
+                                    if abs(iy_vis - ly_vis) < 30 and ix_vis < lx2_vis + 50: 
+                                        text_y = iy2_vis + 20
+                                    cv2.putText(img_to_show, inferred_text_simple, (ix_vis, text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 128, 0), 2)
+                                except Exception as draw_err:
+                                    st.error(f"Error: Failed to draw Inferred box/text: {draw_err}, BBox={inferred_bbox_vis}")
+                            elif label_bbox_vis:
+                                try:
+                                    lx2_vis, ly_vis, _, _ = label_bbox_vis
+                                    cv2.putText(img_to_show, 'Area Infer Failed', (lx2_vis + 5, ly_vis + 15), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 1)
+                                    st.info(f"Marked inference failure (Rule: {inferred_rule})")
+                                except Exception as draw_err:
+                                    st.error(f"Error: Failed to draw Label '{entity_type}': {draw_err}, BBox={label_bbox_vis}")
+                    else:
+                        st.warning(f"  Page {page_num + 1} has no signature fields, displaying original image.")
                     try:
                         img_to_show_rgb = cv2.cvtColor(img_to_show, cv2.COLOR_BGR2RGB)
                         st.image(img_to_show_rgb, caption=f"Page {page_num + 1} - Signature Area Inference (DocAI Label: Red, Post-Processing: Green)")
@@ -1289,10 +1301,11 @@ if st.session_state.uploaded_file:
             document = process_document_ai(file_path)
                 
             if document:
-                processed_results, doc_ai_dimensions = extract_and_infer_signature_areas(document)
+                processed_results, doc_ai_dimensions,page_images = extract_and_infer_signature_areas(document)
                 # Store results in session state
-                st.session_state.results = processed_results
+                st.session_state.processed_results = processed_results
                 st.session_state.doc_dimensions = doc_ai_dimensions
+                st.session_state.page_images = page_images
                 st.session_state.current_processed_results = processed_results
                 st.session_state.current_file_path = file_path
             else:
@@ -1300,15 +1313,16 @@ if st.session_state.uploaded_file:
                 st.stop()
                     
             # Use the results
-            boxes = st.session_state.results
+            processed_results = st.session_state.processed_results
             doc_ai_dimensions = st.session_state.doc_dimensions
+            page_images = st.session_state.page_images
                 
             st.subheader(":the_horns: Kdan AI result")
-            visualize_results(file_path, boxes, doc_ai_dimensions)
-            if boxes:
+            visualize_results(processed_results, doc_ai_dimensions,page_images)
+            if processed_results:
                 st.success(":the_horns: **Signature area detected!** :the_horns:")
                 st.text("Bounding Box:")
-                st.write(boxes)
+                st.write(processed_results)
             else:
                 st.warning("rolling_on_the_floor_laughing: No signature detected or processing error. rolling_on_the_floor_laughing:")
 
@@ -1336,7 +1350,9 @@ if st.session_state.uploaded_file:
         if st.button("Clear"):
             # Reset all relevant session state variables
             st.session_state.uploaded_file = None
-            st.session_state.boxes = None
+            st.session_state.processed_results = None
+            st.session_state.doc_dimensions = None
+            st.session_state.page_images = None
             st.session_state.gcs_path = None
             st.session_state.uploader_key = f"doc_upload_{datetime.now().strftime('%Y%m%d%H%M%S')}"
             st.session_state.file_source = "Upload File" # Reset file source to default
